@@ -1,0 +1,134 @@
+name: Web Cache Poison Scanner
+
+on:
+  schedule:
+    - cron: '0 */7 * * *'  # Run every 7 hours
+  workflow_dispatch:  # Allow manual triggers
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests python-telegram-bot urllib3
+        
+    - name: Install Subfinder
+      run: |
+        go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+        echo "${HOME}/go/bin" >> $GITHUB_PATH
+        
+    - name: Cache proxy list
+      id: cache-proxies
+      uses: actions/cache@v3
+      with:
+        path: proxies.txt
+        key: ${{ runner.os }}-proxies-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-proxies-
+          
+    - name: Update proxy list
+      if: steps.cache-proxies.outputs.cache-hit != 'true'
+      run: |
+        curl -s https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt > proxies.txt
+        
+    - name: Run cache poison scanner
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        # Run scanner and save results
+        python tools/cache_poison_detector.py \
+          --output scan_results.json \
+          --proxy-list proxies.txt \
+          --threads 20 \
+          --timeout 15
+        
+        # Send results to Telegram
+        python - <<EOF
+        import telegram
+        import asyncio
+        import json
+        from datetime import datetime
+        
+        async def send_results():
+            try:
+                bot = telegram.Bot(token='${{ secrets.TELEGRAM_BOT_TOKEN }}')
+                chat_id = '${{ secrets.TELEGRAM_CHAT_ID }}'
+                
+                # Create detailed report
+                with open('scan_results.json', 'r') as f:
+                    results = json.load(f)
+                
+                report = f"🔍 Cache Poisoning Scan Results\n"
+                report += f"📅 Date: {datetime.now().isoformat()}\n"
+                report += f"🎯 Total Targets Scanned: {len(results)}\n\n"
+                
+                for result in results:
+                    report += f"💡 Vulnerability Found:\n"
+                    report += f"🌐 URL: {result['url']}\n"
+                    report += f"📝 Headers: {json.dumps(result['vulnerable_headers'], indent=2)}\n"
+                    report += f"🎯 Evidence:\n"
+                    report += f"- Confidence: {result['evidence']['confidence']}\n"
+                    report += f"- Indicators: {', '.join(result['evidence']['indicators'])}\n"
+                    report += f"- Cache Info: {json.dumps(result['cache_info'], indent=2)}\n\n"
+                    report += "=" * 40 + "\n\n"
+                
+                # Save report to file
+                with open('scan_report.txt', 'w') as f:
+                    f.write(report)
+                
+                # Send file to Telegram
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=open('scan_report.txt', 'rb'),
+                    caption='🚨 Cache Poisoning Vulnerabilities Report'
+                )
+                
+                # Send summary message
+                summary = f"📊 Scan Summary:\n"
+                summary += f"- Total Vulnerabilities: {len(results)}\n"
+                summary += f"- Scan Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=summary,
+                    parse_mode='HTML'
+                )
+                
+            except Exception as e:
+                print(f"Error sending results to Telegram: {e}")
+                raise
+        
+        asyncio.run(send_results())
+        EOF
+      continue-on-error: true
+
+    - name: Upload scan results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: scan-results
+        path: |
+          scan_results.json
+          scan_report.txt
+        retention-days: 30
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -f scan_results.json scan_report.txt proxies.txt
