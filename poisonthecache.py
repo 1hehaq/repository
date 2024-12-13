@@ -456,19 +456,43 @@ class CachePoisonDetector:
         
         for target in self.all_targets:
             try:
-                self.logger.info(f"Scanning target: {target}")
-                self.target_url = f"https://{target}"
+                self.logger.info(f"🎯 Starting scan for target: {target}")
+                self.target_url = target
                 
                 # Try HTTPS first
                 try:
+                    self.logger.info("Testing HTTPS...")
                     test_response = requests.get(self.target_url, timeout=5, verify=False)
                 except:
                     # If HTTPS fails, try HTTP
-                    self.target_url = f"http://{target}"
+                    self.logger.info("HTTPS failed, trying HTTP...")
+                    self.target_url = target.replace('https://', 'http://')
                 
-                results = self.scan()
-                if results:
-                    all_results.extend(results)
+                self.logger.info("Analyzing cache behavior...")
+                is_cacheable, cache_info = self.analyze_cacheability(self.target_url)
+                
+                if is_cacheable:
+                    self.logger.info(f"✅ Target is cacheable! Found indicators: {', '.join(cache_info['cache_headers'])}")
+                    self.logger.info(f"CDN detected: {cache_info['cdn_info']}")
+                    
+                    self.logger.info("Testing for cache poisoning vulnerabilities...")
+                    results = self.scan()
+                    
+                    if results:
+                        self.logger.info(f"🚨 Found {len(results)} potential vulnerabilities!")
+                        for result in results:
+                            self.logger.info(f"""
+                            Vulnerability Details:
+                            - URL: {result['url']}
+                            - Vulnerable Headers: {json.dumps(result['vulnerable_headers'], indent=2)}
+                            - Confidence: {result['evidence']['confidence']}
+                            - Indicators: {', '.join(result['evidence']['indicators'])}
+                            """)
+                        all_results.extend(results)
+                    else:
+                        self.logger.info("No vulnerabilities found in this target")
+                else:
+                    self.logger.info("❌ Target is not cacheable, skipping...")
                     
             except Exception as e:
                 self.logger.error(f"Failed to scan {target}: {e}")
@@ -481,10 +505,15 @@ def main():
     parser.add_argument('-u', '--url', help='Target URL (optional, will use random targets if not specified)')
     parser.add_argument('-t', '--threads', type=int, default=10, help='Number of threads')
     parser.add_argument('-o', '--output', help='Output JSON file')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('--timeout', type=int, default=10, help='Request timeout in seconds')
-    parser.add_argument('--proxy-list', help='Proxy list URL')
+    parser.add_argument('--proxy-list', help='Proxy list URL or file path')
     
     args = parser.parse_args()
+    
+    # Set logging level based on verbose flag
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
     
     detector = CachePoisonDetector(
         target_url=args.url,
@@ -493,19 +522,32 @@ def main():
         proxy_list_url=args.proxy_list
     )
     
+    print("\n🔍 Starting Cache Poison Detection Scan\n")
     results = detector.scan_all()
     
     if results:
-        print("\nNOTHING!")
+        print("\n🚨 Potential cache poisoning vulnerabilities found!")
+        print(f"Total vulnerabilities: {len(results)}")
+        
         if args.output:
             with open(args.output, 'w') as f:
                 json.dump(results, f, indent=2)
-            print(f"Results saved to {args.output}")
-        else:
-            print(json.dumps(results, indent=2))
+            print(f"\n✅ Results saved to {args.output}")
+        
+        # Print summary of findings
+        print("\n📊 Summary of Findings:")
+        for idx, result in enumerate(results, 1):
+            print(f"""
+            Finding #{idx}:
+            - URL: {result['url']}
+            - Vulnerable Headers: {json.dumps(result['vulnerable_headers'], indent=2)}
+            - Confidence: {result['evidence']['confidence']}
+            - Indicators: {', '.join(result['evidence']['indicators'])}
+            """)
+        
         sys.exit(1)
     else:
-        print("\nVULNERABLE!")
+        print("\n✅ No cache poisoning vulnerabilities detected")
         sys.exit(0)
 
 if __name__ == "__main__":
