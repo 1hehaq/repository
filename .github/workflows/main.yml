@@ -51,10 +51,10 @@ jobs:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        # Run scanner and save results
+        # Run scanner with local proxy file path
         python poisonthecache.py \
           --output scan_results.json \
-          --proxy-list proxies.txt \
+          --proxy-list file://$(pwd)/proxies.txt \
           --threads 20 \
           --timeout 15
         
