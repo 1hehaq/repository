@@ -542,6 +542,93 @@ class CachePoisonDetector:
                 
         return all_results
 
+    def generate_header_combinations(self) -> List[Dict[str, str]]:
+        """Generate different combinations of headers to test"""
+        combinations = []
+        
+        # Generate single header tests
+        for header, values in self.test_headers.items():
+            if isinstance(values, list):
+                for value in values:
+                    combinations.append({header: value})
+            else:
+                combinations.append({header: values})
+        
+        # Generate common combination pairs
+        common_pairs = [
+            ('X-Forwarded-Host', 'X-Forwarded-Proto'),
+            ('X-Forwarded-Host', 'X-Forwarded-Scheme'),
+            ('Host', 'X-Forwarded-For'),
+            ('X-Original-URL', 'X-Forwarded-Host'),
+            ('X-Rewrite-URL', 'X-Forwarded-Host'),
+            ('X-Original-Host', 'X-Forwarded-Proto'),
+        ]
+        
+        for header1, header2 in common_pairs:
+            if header1 in self.test_headers and header2 in self.test_headers:
+                values1 = self.test_headers[header1]
+                values2 = self.test_headers[header2]
+                
+                if not isinstance(values1, list):
+                    values1 = [values1]
+                if not isinstance(values2, list):
+                    values2 = [values2]
+                
+                for v1 in values1:
+                    for v2 in values2:
+                        combinations.append({
+                            header1: v1,
+                            header2: v2
+                        })
+        
+        # Generate CDN-specific combinations
+        cdn_combinations = {
+            'Cloudflare': [
+                {'CF-Connecting-IP': '127.0.0.1', 'X-Forwarded-For': '127.0.0.1'},
+                {'CF-Connecting-IP': '127.0.0.1', 'X-Forwarded-Host': 'evil.com'},
+            ],
+            'Fastly': [
+                {'Fastly-SSL': '1', 'X-Forwarded-Host': 'evil.com'},
+                {'Fastly-SSL': '1', 'X-Original-URL': '/admin'},
+            ],
+            'Akamai': [
+                {'Akamai-Origin-Hop': '1', 'X-Forwarded-Host': 'evil.com'},
+                {'True-Client-IP': '127.0.0.1', 'X-Forwarded-Host': 'evil.com'},
+            ]
+        }
+        
+        # Add CDN-specific combinations based on detected CDN
+        if hasattr(self, 'current_cdn'):
+            if self.current_cdn in cdn_combinations:
+                combinations.extend(cdn_combinations[self.current_cdn])
+        
+        # Add some path traversal attempts
+        path_traversal = [
+            '/admin',
+            '/../admin',
+            '/../../admin',
+            '/%2e%2e/admin',
+            '/.%2e/admin'
+        ]
+        
+        for path in path_traversal:
+            combinations.append({
+                'X-Original-URL': path,
+                'X-Rewrite-URL': path
+            })
+        
+        # Add cache buster variations
+        cache_busters = [
+            {'Cache-Control': 'no-cache'},
+            {'Pragma': 'no-cache'},
+            {'X-Cache-Hash': 'evil.com'},
+            {'X-Cache-Vary': 'accept-encoding,host,x-forwarded-host'}
+        ]
+        combinations.extend(cache_busters)
+        
+        self.logger.debug(f"Generated {len(combinations)} header combinations to test")
+        return combinations
+
 def main():
     parser = argparse.ArgumentParser(description='Web Cache Poison Detector')
     parser.add_argument('-u', '--url', help='Target URL (optional, will use random targets if not specified)')
