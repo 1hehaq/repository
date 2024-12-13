@@ -13,6 +13,8 @@ from urllib.parse import urlparse, urljoin
 import logging
 from typing import List, Dict, Optional, Set, Tuple
 from requests.exceptions import RequestException
+import os
+from datetime import datetime
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -338,6 +340,42 @@ class CachePoisonDetector:
             
         return 1.0
 
+    def send_telegram_notification(self, result: Dict):
+        """Send immediate notification to Telegram when vulnerability is found"""
+        try:
+            import telegram # type: ignore
+            import asyncio
+            
+            async def send_alert():
+                bot = telegram.Bot(token=os.getenv('TELEGRAM_BOT_TOKEN'))
+                chat_id = os.getenv('TELEGRAM_CHAT_ID')
+                
+                alert = f"""🚨 Cache Poisoning Vulnerability Found!
+
+🌐 Target: {result['url']}
+📊 Confidence Score: {result['evidence']['confidence']}
+
+📝 Vulnerable Headers:
+{json.dumps(result['vulnerable_headers'], indent=2)}
+
+🎯 Detection Indicators:
+- {', '.join(result['evidence']['indicators'])}
+
+🔍 Cache Info:
+{json.dumps(result['cache_info'], indent=2)}
+
+⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=alert,
+                    parse_mode='HTML'
+                )
+                
+            asyncio.run(send_alert())
+        except Exception as e:
+            self.logger.error(f"Failed to send Telegram notification: {e}")
+
     def test_header_combination(self, headers: Dict[str, str]) -> Optional[Dict]:
         """Enhanced cache poisoning detection"""
         try:
@@ -372,7 +410,7 @@ class CachePoisonDetector:
             )
 
             if evidence['is_vulnerable']:
-                return {
+                result = {
                     'url': self.target_url,
                     'vulnerable_headers': headers,
                     'evidence': evidence,
@@ -382,6 +420,10 @@ class CachePoisonDetector:
                         'cache_keys': list(self.cache_indicators)
                     }
                 }
+                
+                # Send immediate notification
+                self.send_telegram_notification(result)
+                return result
 
         except Exception as e:
             self.logger.error(f"Error testing headers {headers}: {str(e)}")
