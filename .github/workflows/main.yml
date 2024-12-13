@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 */7 * * *'  # Run every 7 hours
   workflow_dispatch:  # Allow manual triggers
+    inputs:
+      target_url:
+        description: 'Target URL to scan (optional)'
+        required: false
+        type: string
 
 jobs:
   scan:
@@ -51,73 +56,20 @@ jobs:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        # Run scanner with local proxy file path
-        python poisonthecache.py \
-          --output scan_results.json \
-          --proxy-list file://$(pwd)/proxies.txt \
-          --threads 20 \
-          --timeout 15
+        # Construct command based on whether target URL was provided
+        CMD="python poisonthecache.py --output scan_results.json --proxy-list file://$(pwd)/proxies.txt --threads 20 --timeout 15"
         
-        # Send results to Telegram
-        python - <<EOF
-        import telegram
-        import asyncio
-        import json
-        from datetime import datetime
+        # Add target URL if provided through manual trigger
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.target_url }}" ]; then
+          CMD="$CMD --url ${{ inputs.target_url }}"
+          echo "🎯 Running scan on specified target: ${{ inputs.target_url }}"
+        else
+          echo "🔄 Running automatic scan using targets from bounty-targets-data"
+        fi
         
-        async def send_results():
-            try:
-                bot = telegram.Bot(token='${{ secrets.TELEGRAM_BOT_TOKEN }}')
-                chat_id = '${{ secrets.TELEGRAM_CHAT_ID }}'
-                
-                # Create detailed report
-                with open('scan_results.json', 'r') as f:
-                    results = json.load(f)
-                
-                report = f"🔍 Cache Poisoning Scan Results\n"
-                report += f"📅 Date: {datetime.now().isoformat()}\n"
-                report += f"🎯 Total Targets Scanned: {len(results)}\n\n"
-                
-                for result in results:
-                    report += f"💡 Vulnerability Found:\n"
-                    report += f"🌐 URL: {result['url']}\n"
-                    report += f"📝 Headers: {json.dumps(result['vulnerable_headers'], indent=2)}\n"
-                    report += f"🎯 Evidence:\n"
-                    report += f"- Confidence: {result['evidence']['confidence']}\n"
-                    report += f"- Indicators: {', '.join(result['evidence']['indicators'])}\n"
-                    report += f"- Cache Info: {json.dumps(result['cache_info'], indent=2)}\n\n"
-                    report += "=" * 40 + "\n\n"
-                
-                # Save report to file
-                with open('scan_report.txt', 'w') as f:
-                    f.write(report)
-                
-                # Send file to Telegram
-                await bot.send_document(
-                    chat_id=chat_id,
-                    document=open('scan_report.txt', 'rb'),
-                    caption='🚨 Cache Poisoning Vulnerabilities Report'
-                )
-                
-                # Send summary message
-                summary = f"📊 Scan Summary:\n"
-                summary += f"- Total Vulnerabilities: {len(results)}\n"
-                summary += f"- Scan Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=summary,
-                    parse_mode='HTML'
-                )
-                
-            except Exception as e:
-                print(f"Error sending results to Telegram: {e}")
-                raise
+        # Execute the command
+        eval $CMD
         
-        asyncio.run(send_results())
-        EOF
-      continue-on-error: true
-
     - name: Upload scan results
       if: always()
       uses: actions/upload-artifact@v3
@@ -125,10 +77,9 @@ jobs:
         name: scan-results
         path: |
           scan_results.json
-          scan_report.txt
         retention-days: 30
         
     - name: Cleanup
       if: always()
       run: |
-        rm -f scan_results.json scan_report.txt proxies.txt
+        rm -f scan_results.json proxies.txt
