@@ -52,7 +52,7 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
         # Run scanner and save results
-        python tools/cache_poison_detector.py \
+        python tools/poisonthecache.py \
           --output scan_results.json \
           --proxy-list proxies.txt \
           --threads 20 \
