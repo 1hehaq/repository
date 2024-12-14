@@ -56,10 +56,8 @@ jobs:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        # Construct command based on whether target URL was provided
         CMD="python poisonthecache.py --output scan_results.json --proxy-list $(find / -type f -name 'proxies.txt' 2>/dev/null) --threads 20 --timeout 15"
         
-        # Add target URL if provided through manual trigger
         if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.target_url }}" ]; then
           CMD="$CMD --url ${{ inputs.target_url }}"
           echo "🎯 Running scan on specified target: ${{ inputs.target_url }}"
@@ -67,7 +65,6 @@ jobs:
           echo "🔄 Running automatic scan using targets from bounty-targets-data"
         fi
         
-        # Execute the command
         eval $CMD
         
     - name: Upload scan results
