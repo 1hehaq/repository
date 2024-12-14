@@ -341,40 +341,25 @@ class CachePoisonDetector:
         return 1.0
 
     def send_telegram_notification(self, result: Dict):
-        """Send immediate notification to Telegram when vulnerability is found"""
+        """Send minimal, focused notification"""
         try:
-            import telegram # type: ignore
+            import telegram
             import asyncio
             
             async def send_alert():
                 bot = telegram.Bot(token=os.getenv('TELEGRAM_BOT_TOKEN'))
                 chat_id = os.getenv('TELEGRAM_CHAT_ID')
                 
-                alert = f"""🚨 Cache Poisoning Vulnerability Found!
+                alert = f"""Cache Poisoning Found:
+Target: {result['url']}
+Payload: {json.dumps(result['payload']['headers'], indent=2)}
+Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers), indent=2)}"""
 
-🌐 Target: {result['url']}
-📊 Confidence Score: {result['evidence']['confidence']}
-
-📝 Vulnerable Headers:
-{json.dumps(result['vulnerable_headers'], indent=2)}
-
-🎯 Detection Indicators:
-- {', '.join(result['evidence']['indicators'])}
-
-🔍 Cache Info:
-{json.dumps(result['cache_info'], indent=2)}
-
-⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=alert,
-                    parse_mode='HTML'
-                )
+                await bot.send_message(chat_id=chat_id, text=alert)
                 
             asyncio.run(send_alert())
         except Exception as e:
-            self.logger.error(f"Failed to send Telegram notification: {e}")
+            self.logger.error(f"Notification failed: {e}")
 
     def test_header_combination(self, headers: Dict[str, str]) -> Optional[Dict]:
         """Enhanced cache poisoning detection"""
@@ -437,45 +422,159 @@ class CachePoisonDetector:
         verify_resps: List[requests.Response],
         test_headers: Dict[str, str]
     ) -> Dict:
-        """Analyze evidence of successful cache poisoning"""
+        """Precise cache poisoning detection with strict validation"""
         evidence = {
             'is_vulnerable': False,
-            'confidence': 0.0,
-            'indicators': []
+            'poisoned_response': None,
+            'payload': None
         }
 
-        # Check status code variations
-        status_codes = [r.status_code for r in verify_resps]
-        if any(sc != control_resp.status_code for sc in status_codes):
-            evidence['indicators'].append('status_code_mismatch')
-            evidence['confidence'] += 0.3
+        # Strict validation of responses
+        if not self.validate_responses(control_resp, poison_resp, verify_resps):
+            return evidence
 
-        # Check for poisoned content in responses
-        for resp in verify_resps:
-            for payload in test_headers.values():
-                if isinstance(payload, str) and payload in resp.text:
-                    evidence['indicators'].append('payload_reflected')
-                    evidence['confidence'] += 0.4
-                    break
+        # Verify cache behavior
+        if not self.is_definitely_cached(control_resp, verify_resps):
+            return evidence
 
-        # Check header poisoning
-        for resp in verify_resps:
-            for header, value in test_headers.items():
-                if header in resp.headers and value in resp.headers[header]:
-                    evidence['indicators'].append('header_poisoned')
-                    evidence['confidence'] += 0.4
-
-        # Check response size variations
-        control_size = len(control_resp.content)
-        poison_sizes = [len(r.content) for r in verify_resps]
-        if any(abs(ps - control_size) > control_size * 0.1 for ps in poison_sizes):
-            evidence['indicators'].append('size_variation')
-            evidence['confidence'] += 0.2
-
-        # Final vulnerability determination
-        evidence['is_vulnerable'] = evidence['confidence'] >= 0.7
+        # Verify poisoning with multiple precise checks
+        poisoning_result = self.verify_precise_poisoning(
+            control_resp,
+            poison_resp,
+            verify_resps,
+            test_headers
+        )
         
+        if poisoning_result['confirmed']:
+            evidence.update({
+                'is_vulnerable': True,
+                'poisoned_response': poisoning_result['response'],
+                'payload': poisoning_result['payload']
+            })
+
         return evidence
+
+    def is_definitely_cached(self, control_resp: requests.Response, verify_resps: List[requests.Response]) -> bool:
+        """Strict cache validation"""
+        cache_headers = {
+            'CF-Cache-Status': {'HIT'},
+            'X-Cache': {'HIT', 'TCP_HIT'},
+            'X-Varnish': None,  # Presence indicates Varnish
+            'Age': None,  # Any value > 0 indicates caching
+            'X-Cache-Hits': None  # Any value > 0 indicates caching
+        }
+
+        # Check control response
+        cache_indicators = 0
+        for header, valid_values in cache_headers.items():
+            if header in control_resp.headers:
+                if valid_values is None:
+                    if header == 'Age' and int(control_resp.headers[header] or 0) > 0:
+                        cache_indicators += 1
+                    elif header == 'X-Cache-Hits' and int(control_resp.headers[header] or 0) > 0:
+                        cache_indicators += 1
+                    else:
+                        cache_indicators += 1
+                elif control_resp.headers[header] in valid_values:
+                    cache_indicators += 1
+
+        # Verify consistent caching behavior
+        for resp in verify_resps:
+            resp_indicators = 0
+            for header, valid_values in cache_headers.items():
+                if header in resp.headers:
+                    if valid_values is None or resp.headers[header] in valid_values:
+                        resp_indicators += 1
+            
+            if resp_indicators != cache_indicators:
+                return False
+
+        return cache_indicators > 0
+
+    def verify_precise_poisoning(
+        self,
+        control_resp: requests.Response,
+        poison_resp: requests.Response,
+        verify_resps: List[requests.Response],
+        test_headers: Dict[str, str]
+    ) -> Dict:
+        """Precise verification of cache poisoning"""
+        result = {
+            'confirmed': False,
+            'response': None,
+            'payload': None
+        }
+
+        # Extract unique identifiers from poison response
+        poison_identifiers = self.extract_poison_indicators(poison_resp, test_headers)
+        
+        # Verify poisoning across all verification responses
+        confirmed_responses = []
+        for resp in verify_resps:
+            if self.confirm_poison_indicators(resp, poison_identifiers):
+                confirmed_responses.append(resp)
+
+        # Require at least 2 verification responses to confirm
+        if len(confirmed_responses) >= 2:
+            result.update({
+                'confirmed': True,
+                'response': confirmed_responses[0],
+                'payload': {
+                    'headers': test_headers,
+                    'indicators': poison_identifiers
+                }
+            })
+
+        return result
+
+    def extract_poison_indicators(self, resp: requests.Response, test_headers: Dict[str, str]) -> Set[str]:
+        """Extract unique indicators of successful poisoning"""
+        indicators = set()
+        
+        # Check for reflected headers
+        for header, value in test_headers.items():
+            if value in resp.text:
+                indicators.add(f"reflected:{value}")
+        
+        # Check for modified headers
+        for header, value in test_headers.items():
+            if header in resp.headers and value in resp.headers[header]:
+                indicators.add(f"header_modified:{header}={value}")
+
+        return indicators
+
+    def confirm_poison_indicators(self, resp: requests.Response, indicators: Set[str]) -> bool:
+        """Confirm presence of poison indicators in response"""
+        for indicator in indicators:
+            indicator_type, value = indicator.split(':', 1)
+            
+            if indicator_type == 'reflected':
+                if value not in resp.text:
+                    return False
+            elif indicator_type == 'header_modified':
+                header, expected = value.split('=', 1)
+                if header not in resp.headers or expected not in resp.headers[header]:
+                    return False
+
+        return True
+
+    def validate_responses(self, control_resp, poison_resp, verify_resps) -> bool:
+        """Comprehensive response validation"""
+        if not all([control_resp, poison_resp] + verify_resps):
+            return False
+        
+        # Validate response codes
+        valid_codes = {200, 301, 302, 307, 308}  # Expected response codes
+        if not all(r.status_code in valid_codes for r in [control_resp, poison_resp] + verify_resps):
+            return False
+        
+        # Check for error pages
+        error_indicators = ['error', 'exception', 'not found', 'forbidden']
+        if any(any(ind in r.text.lower() for ind in error_indicators) 
+               for r in [control_resp, poison_resp] + verify_resps):
+            return False
+        
+        return True
 
     def scan(self) -> List[Dict]:
         """Main scanning function"""
