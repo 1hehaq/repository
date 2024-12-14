@@ -56,7 +56,7 @@ jobs:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        CMD="python poisonthecache.py --output scan_results.json --proxy-list $(GITHUB_ROOT) --threads 20 --timeout 15"
+        CMD="python poisonthecache.py --output scan_results.json --proxy-list file://$(HOME)/proxies.txt --threads 20 --timeout 15"
         
         if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.target_url }}" ]; then
           CMD="$CMD --url ${{ inputs.target_url }}"
