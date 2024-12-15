@@ -437,7 +437,28 @@ class CachePoisonDetector:
             import os
             import sys
             from contextlib import redirect_stdout, redirect_stderr
-            
+
+            def response_to_dict(response):
+                if not response:
+                    return None
+                return {
+                    'status_code': response.status_code,
+                    'headers': dict(response.headers),
+                    'url': response.url,
+                    'text': response.text[:1000]
+                }
+
+            if 'cache_info' in result and 'headers' in result['cache_info']:
+                result['cache_info']['headers'] = dict(result['cache_info']['headers'])
+
+            if 'evidence' in result:
+                if 'response' in result['evidence']:
+                    result['evidence']['response'] = response_to_dict(result['evidence']['response'])
+                if 'verification_requests' in result['evidence']:
+                    result['evidence']['verification_requests'] = [
+                        response_to_dict(r) for r in result['evidence']['verification_requests']
+                    ]
+
             async def send_alert():
                 with open(os.devnull, 'w') as devnull:
                     with redirect_stdout(devnull), redirect_stderr(devnull):
@@ -447,16 +468,16 @@ class CachePoisonDetector:
                         alert = f"""🚨 Cache Poisoning Vulnerability Found
 
 Target: {result['url']}
-CDN: {result['cache_info'].get('cdn_info', 'Unknown')}
+CDN: {result.get('cache_info', {}).get('cdn_info', 'Unknown')}
 
 Vulnerable Headers:
-{json.dumps(result['vulnerable_headers'], indent=2)}
+{json.dumps(result.get('vulnerable_headers', {}), indent=2)}
 
 Cache Info:
-{json.dumps(result['cache_info'], indent=2)}
+{json.dumps(result.get('cache_info', {}), indent=2)}
 
 Evidence:
-{json.dumps(result['evidence'], indent=2)}
+{json.dumps(result.get('evidence', {}), indent=2)}
 
 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
