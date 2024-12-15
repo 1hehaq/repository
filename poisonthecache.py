@@ -437,6 +437,7 @@ class CachePoisonDetector:
             import os
             import sys
             from contextlib import redirect_stdout, redirect_stderr
+            import copy
 
             def response_to_dict(response):
                 if not response:
@@ -448,16 +449,22 @@ class CachePoisonDetector:
                     'text': response.text[:1000]
                 }
 
-            if 'cache_info' in result and 'headers' in result['cache_info']:
-                result['cache_info']['headers'] = dict(result['cache_info']['headers'])
+            def convert_responses(obj):
+                if isinstance(obj, requests.Response):
+                    return response_to_dict(obj)
+                elif isinstance(obj, dict):
+                    return {k: convert_responses(v) for k, v in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    return [convert_responses(item) for item in obj]
+                return obj
 
-            if 'evidence' in result:
-                if 'response' in result['evidence']:
-                    result['evidence']['response'] = response_to_dict(result['evidence']['response'])
-                if 'verification_requests' in result['evidence']:
-                    result['evidence']['verification_requests'] = [
-                        response_to_dict(r) for r in result['evidence']['verification_requests']
-                    ]
+            serializable_result = convert_responses(copy.deepcopy(result))
+            
+            try:
+                json.dumps(serializable_result)
+            except TypeError as e:
+                self.logger.error(f"Serialization check failed: {str(e)}")
+                return
 
             async def send_alert():
                 with open(os.devnull, 'w') as devnull:
@@ -467,17 +474,17 @@ class CachePoisonDetector:
                         
                         alert = f"""🚨 Cache Poisoning Vulnerability Found
 
-Target: {result['url']}
-CDN: {result.get('cache_info', {}).get('cdn_info', 'Unknown')}
+Target: {serializable_result['url']}
+CDN: {serializable_result.get('cache_info', {}).get('cdn_info', 'Unknown')}
 
 Vulnerable Headers:
-{json.dumps(result.get('vulnerable_headers', {}), indent=2)}
+{json.dumps(serializable_result.get('vulnerable_headers', {}), indent=2)}
 
 Cache Info:
-{json.dumps(result.get('cache_info', {}), indent=2)}
+{json.dumps(serializable_result.get('cache_info', {}), indent=2)}
 
 Evidence:
-{json.dumps(result.get('evidence', {}), indent=2)}
+{json.dumps(serializable_result.get('evidence', {}), indent=2)}
 
 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
