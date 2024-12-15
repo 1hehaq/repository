@@ -21,6 +21,7 @@ import difflib
 import uuid
 import statistics
 from urllib.parse import parse_qs
+from contextlib import redirect_stdout, redirect_stderr
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -104,18 +105,20 @@ class ResponseChain:
     chain_broken: bool
 
 class CachePoisonUI:
+    def __init__(self):
+        self.silent = bool(os.getenv('SILENT_MODE', False))
     
-    @staticmethod
-    def log(message: str):
-        print(f"[*] {message}")
+    def log(self, message: str):
+        if not self.silent:
+            print(f"[*] {message}")
 
-    @staticmethod
-    def error(message: str):
-        print(f"[!] {message}")
+    def error(self, message: str):
+        if not self.silent:
+            print(f"[!] {message}")
 
-    @staticmethod
-    def success(message: str):
-        print(f"[+] {message}")
+    def success(self, message: str):
+        if not self.silent:
+            print(f"[+] {message}")
 
 class CachePoisonDetector:
     def __init__(self, target_url: str = None, threads: int = 10, timeout: int = 10, proxy_list_url: str = None, auto_mode: bool = False):
@@ -431,12 +434,17 @@ class CachePoisonDetector:
         try:
             import telegram
             import asyncio
+            import os
+            import sys
+            from contextlib import redirect_stdout, redirect_stderr
             
             async def send_alert():
-                bot = telegram.Bot(token=os.getenv('TELEGRAM_BOT_TOKEN'))
-                chat_id = os.getenv('TELEGRAM_CHAT_ID')
-                
-                alert = f"""🚨 Cache Poisoning Vulnerability Found
+                with open(os.devnull, 'w') as devnull:
+                    with redirect_stdout(devnull), redirect_stderr(devnull):
+                        bot = telegram.Bot(token=os.getenv('TELEGRAM_BOT_TOKEN'))
+                        chat_id = os.getenv('TELEGRAM_CHAT_ID')
+                        
+                        alert = f"""🚨 Cache Poisoning Vulnerability Found
 
 Target: {result['url']}
 CDN: {result['cache_info'].get('cdn_info', 'Unknown')}
@@ -452,12 +460,16 @@ Evidence:
 
 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
-                await bot.send_message(chat_id=chat_id, text=alert, parse_mode='Markdown')
+                        await bot.send_message(chat_id=chat_id, text=alert, parse_mode='Markdown')
                 
-            asyncio.run(send_alert())
-            self.ui.success("Notification sent to Telegram")
+            with open(os.devnull, 'w') as devnull:
+                with redirect_stdout(devnull), redirect_stderr(devnull):
+                    asyncio.run(send_alert())
+                
         except Exception as e:
-            self.logger.error(f"Failed to send Telegram notification: {str(e)}")
+            with open(os.devnull, 'w') as devnull:
+                with redirect_stderr(devnull):
+                    self.logger.error(f"Failed to send Telegram notification: {str(e)}")
 
     def test_header_combination(self, headers: Dict[str, str]) -> Optional[Dict]:
         try:
