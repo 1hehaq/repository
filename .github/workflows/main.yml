@@ -1,9 +1,9 @@
-name: Web Cache Poison Scanner
+name: Cache Poison Scanner
 
 on:
   schedule:
     - cron: '0 */7 * * *'  # Run every 7 hours
-  workflow_dispatch:  # Allow manual triggers
+  workflow_dispatch:
     inputs:
       target_url:
         description: 'Target URL to scan (optional)'
@@ -31,52 +31,17 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install requests python-telegram-bot urllib3
-        
-    - name: Install Subfinder
-      run: |
         go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
         echo "${HOME}/go/bin" >> $GITHUB_PATH
         
-    - name: Cache proxy list
-      id: cache-proxies
-      uses: actions/cache@v3
-      with:
-        path: proxies.txt
-        key: ${{ runner.os }}-proxies-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-proxies-
-          
-    - name: Update proxy list
-      if: steps.cache-proxies.outputs.cache-hit != 'true'
-      run: |
-        curl -s https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt > proxies.txt
-        
-    - name: Run cache poison scanner
+    - name: Run scanner
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        SILENT_MODE: "true"
       run: |
-        CMD="python poisonthecache.py --output scan_results.json --proxy-list file://$(echo $HOME)/proxies.txt --threads 20 --timeout 15"
-        
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.target_url }}" ]; then
-          CMD="$CMD --url ${{ inputs.target_url }}"
-          echo "🎯 Running scan on specified target: ${{ inputs.target_url }}"
+        if [ -n "${{ inputs.target_url }}" ]; then
+          python poisonthecache.py -u "${{ inputs.target_url }}"
         else
-          echo "🔄 Running automatic scan using targets from bounty-targets-data"
+          python poisonthecache.py --auto
         fi
-        
-        eval $CMD
-        
-    - name: Upload scan results
-      if: always()
-      uses: actions/upload-artifact@v3
-      with:
-        name: scan-results
-        path: |
-          scan_results.json
-        retention-days: 30
-        
-    - name: Cleanup
-      if: always()
-      run: |
-        rm -f scan_results.json proxies.txt
