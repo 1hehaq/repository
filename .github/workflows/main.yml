@@ -87,7 +87,7 @@ jobs:
         SILENT_MODE: "true"
         ENABLE_NOTIFICATIONS: ${{ inputs.live_notifications != false }}
       run: |
-        SCAN_CMD="python cache_poison_detector.py"
+        SCAN_CMD="python poisonthecache.py"
         
         if [ -n "${{ inputs.target_url }}" ]; then
           SCAN_CMD="$SCAN_CMD -u ${{ inputs.target_url }}"
