@@ -123,13 +123,15 @@ class CachePoisonUI:
 
 class CachePoisonDetector:
     def __init__(self, target_url: str = None, threads: int = 10, timeout: int = 10, 
-                 proxy_list_url: str = None, auto_mode: bool = False, enable_subdomain_enum: bool = False):
+                 proxy_list_url: str = None, auto_mode: bool = False, 
+                 enable_subdomain_enum: bool = False, notifications_disabled: bool = False):
         self.ui = CachePoisonUI()
         self.target_url = target_url
         self.threads = threads
         self.timeout = timeout
         self.auto_mode = auto_mode
         self.enable_subdomain_enum = enable_subdomain_enum
+        self.notifications_disabled = notifications_disabled
         self.results = []
         self.proxy_list = []
         self.request_delay = 1.5
@@ -485,6 +487,9 @@ class CachePoisonDetector:
         return 1.0
 
     def send_telegram_notification(self, result: Dict):
+        if hasattr(self, 'notifications_disabled') and self.notifications_disabled:
+            return
+        
         try:
             token = os.getenv('TELEGRAM_BOT_TOKEN')
             chat_id = os.getenv('TELEGRAM_CHAT_ID')
@@ -2055,6 +2060,7 @@ def main():
     parser.add_argument('--timeout', type=int, default=10, help='Request timeout')
     parser.add_argument('--proxy-list', help='Proxy list file')
     parser.add_argument('--auto', action='store_true', help='Auto-select targets from wildcards.txt')
+    parser.add_argument('--no-notify', action='store_true', help='Disable live Telegram notifications')
     
     sub_group = parser.add_mutually_exclusive_group()
     sub_group.add_argument('--sub', action='store_true', help='Enable subdomain enumeration')
@@ -2078,7 +2084,8 @@ def main():
             timeout=args.timeout,
             proxy_list_url=args.proxy_list,
             auto_mode=args.auto,
-            enable_subdomain_enum=enable_subdomain_enum
+            enable_subdomain_enum=enable_subdomain_enum,
+            notifications_disabled=args.no_notify
         )
         
         results = detector.scan_all()
