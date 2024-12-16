@@ -1,0 +1,52 @@
+name: KXSS Automation
+
+on:
+  schedule:
+    - cron: "0 */3 * * *" # every 3 hrs
+  workflow_dispatch:
+    inputs:
+      custom_target:
+        description: "Enter target URL"
+        required: false
+        default: ""
+
+jobs:
+  run-kxss:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install required tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y golang
+          go install github.com/tomnomnom/waybackurls@latest
+          go install github.com/Emoe/kxss@latest
+          export PATH=$PATH:/home/runner/go/bin
+
+      - name: Run KXSS Check
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -n "${{ github.event.inputs.custom_target }}" ]; then
+            TARGET=${{ github.event.inputs.custom_target }}
+          else
+            TARGET=$(curl -s https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt | shuf -n 1)
+          fi
+          echo "Target: $TARGET"
+
+          echo "$TARGET" | waybackurls | kxss > result.txt
+          
+          if grep -E '<|>' result.txt; then
+              MESSAGE="🚨 *kxss found something cool* 🚨\nTarget: *$TARGET*\n\n\`\`\`\n$(cat result.txt | head -n 10)\n\`\`\`\n(Only first 10 lines shown)"
+              curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
+                  -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+                  -d text="$MESSAGE" \
+                  -d parse_mode="Markdown"
+              echo "Notification sent to Telegram."
+          else
+              echo "No XSS payloads found for $TARGET."
+          fi
