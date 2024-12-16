@@ -2,7 +2,7 @@ name: KXSS Automation
 
 on:
   schedule:
-    - cron: "0 */3 * * *" # every 3 hrs
+    - cron: "0 */3 * * *"
   workflow_dispatch:
     inputs:
       custom_target:
@@ -22,16 +22,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y golang
-
           echo "export PATH=\$PATH:/home/runner/go/bin" >> ~/.bashrc
           echo "export GOPATH=\$HOME/go" >> ~/.bashrc
           source ~/.bashrc
-
           go install github.com/tomnomnom/waybackurls@latest
           go install github.com/Emoe/kxss@latest
-
           export PATH=$PATH:$(go env GOPATH)/bin
-
+          echo 'PATH updated:'
+          echo $PATH
+          ls $(go env GOPATH)/bin
           which waybackurls
           which kxss
 
@@ -46,11 +45,8 @@ jobs:
             TARGET=$(curl -s https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt | shuf -n 1)
           fi
           echo "Target: $TARGET"
-
           echo "$TARGET" | waybackurls | kxss > result.txt
-          
           if grep -E '<|>' result.txt; then
-              # Format the message for Telegram
               MESSAGE="🚨 *kxss found something cool* 🚨\nTarget: *$TARGET*\n\n\`\`\`\n$(cat result.txt | head -n 10)\n\`\`\`\n(Only first 10 lines shown)"
               curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
                   -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
