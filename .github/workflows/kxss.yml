@@ -22,9 +22,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y golang
+
+          echo "export PATH=\$PATH:/home/runner/go/bin" >> ~/.bashrc
+          echo "export GOPATH=\$HOME/go" >> ~/.bashrc
+          source ~/.bashrc
+
           go install github.com/tomnomnom/waybackurls@latest
           go install github.com/Emoe/kxss@latest
-          export PATH=$PATH:/home/runner/go/bin
+
+          export PATH=$PATH:$(go env GOPATH)/bin
+
+          which waybackurls
+          which kxss
 
       - name: Run KXSS Check
         env:
@@ -41,6 +50,7 @@ jobs:
           echo "$TARGET" | waybackurls | kxss > result.txt
           
           if grep -E '<|>' result.txt; then
+              # Format the message for Telegram
               MESSAGE="🚨 *kxss found something cool* 🚨\nTarget: *$TARGET*\n\n\`\`\`\n$(cat result.txt | head -n 10)\n\`\`\`\n(Only first 10 lines shown)"
               curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
                   -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
