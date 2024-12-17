@@ -44,9 +44,16 @@ jobs:
     - name: Combine Templates (Official + Coffin)
       run: |
         mkdir -p ~/.nuclei-templates/combined
+        mkdir -p ~/.nuclei-templates/nuclei-templates
+        
+        if [ -d ~/.nuclei-templates/nuclei-templates ]; then
+          cp -r ~/.nuclei-templates/nuclei-templates/* ~/.nuclei-templates/combined/
+        else
+          echo "Warning: Official Nuclei templates directory not found."
+        fi
+        
         cp -r ~/.nuclei-templates/coffin/* ~/.nuclei-templates/combined/
-        cp -r ~/.nuclei-templates/nuclei-templates/* ~/.nuclei-templates/combined/
-        echo "Official and Coffin templates combined into ~/.nuclei-templates/combined"
+        echo "Templates combined into ~/.nuclei-templates/combined"
 
     - name: Prepare Target
       run: |
@@ -83,6 +90,7 @@ jobs:
           -t ~/.nuclei-templates/combined/ \
           -j \
           -json-export nuclei-results.json
+          
         VULN_COUNT=$(grep -c '"severity": "high\|"severity": "critical"' nuclei-results.json || echo 0)
         echo "High/Critical Vulnerabilities found: $VULN_COUNT"
 
@@ -98,6 +106,7 @@ jobs:
         Target: *$TARGET*
         Subdomains Found: *$SUBDOMAIN_COUNT*
         High/Critical Vulnerabilities: *$VULN_COUNT*"
+        
         if [ -s vulnerabilities.txt ]; then
           curl -F "chat_id=$TELEGRAM_CHAT_ID" \
                -F "document=@vulnerabilities.txt" \
@@ -110,7 +119,8 @@ jobs:
                -d text="$MESSAGE" \
                -d parse_mode=Markdown
 
-    - uses: actions/upload-artifact@v4
+    - name: Upload Scan Results
+      uses: actions/upload-artifact@v4
       with:
         name: scan-results
         path: |
