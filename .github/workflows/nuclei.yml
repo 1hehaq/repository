@@ -104,6 +104,7 @@ jobs:
                -d chat_id=$TELEGRAM_CHAT_ID \
                -d text="$MESSAGE" \
                -d parse_mode=Markdown
+        fi
 
     - name: Upload Scan Results
       uses: actions/upload-artifact@v4
