@@ -33,7 +33,7 @@ jobs:
         go install -v github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest
         go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
         go install -v github.com/tomnomnom/assetfinder@latest
-        
+
         nuclei -update-templates
 
     - name: Clone Custom Nuclei Templates
@@ -45,8 +45,10 @@ jobs:
     - name: Deduplicate Nuclei Templates
       run: |
         mkdir -p ~/.nuclei-templates/combined
-        cp -r ~/.nuclei-templates/* ~/.nuclei-templates/combined
-        nuclei -ut -ud ~/.nuclei-templates/combined
+
+        find ~/.nuclei-templates -mindepth 1 -maxdepth 1 ! -name 'combined' -exec cp -r {} ~/.nuclei-templates/combined/ \;
+
+        echo "Templates deduplicated into ~/.nuclei-templates/combined"
 
     - name: Prepare Target
       run: |
@@ -96,7 +98,7 @@ jobs:
         SUBDOMAIN_COUNT=$([ -f subdomains.txt ] && wc -l < subdomains.txt || echo "0")
         VULN_COUNT=$(grep -c '"severity": "high\|"severity": "critical"' nuclei-results.json || echo "0")
 
-        MESSAGE="Vulnerability Scan Report
+        MESSAGE="🚨 *Vulnerability Scan Report* 🚨
         Target: *$TARGET*
         Subdomains Found: *$SUBDOMAIN_COUNT*
         High/Critical Vulnerabilities: *$VULN_COUNT*"
