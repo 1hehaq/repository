@@ -1,8 +1,8 @@
-name: KXSS Checker
+name: kxss checker
 
 on:
   schedule:
-    - cron: "0 */3 * * *"
+    - cron: "0 */3 * * *"  # every 3 hrs
   workflow_dispatch:
     inputs:
       custom_target:
@@ -12,7 +12,7 @@ on:
       subenum:
         description: 'Enable subdomain enumeration'
         required: false
-        default: 'false'
+        default: 'true'
         type: boolean
 
 jobs:
@@ -33,15 +33,17 @@ jobs:
       run: |
         export PATH=$PATH:$(go env GOPATH)/bin
         
+        echo "Installing tools..."
         go install -v github.com/tomnomnom/waybackurls@latest || { echo "Failed to install waybackurls"; exit 1; }
         go install -v github.com/Emoe/kxss@latest || { echo "Failed to install kxss"; exit 1; }
         go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest || { echo "Failed to install subfinder"; exit 1; }
         
+        echo "Verifying tools..."
         waybackurls -h > /dev/null 2>&1 || { echo "waybackurls not working"; exit 1; }
         kxss -h > /dev/null 2>&1 || { echo "kxss not working"; exit 1; }
         subfinder -h > /dev/null 2>&1 || { echo "subfinder not working"; exit 1; }
         
-        echo "All tools successfully installed and verified"
+        echo "All tools successfully installed and verified."
 
     - name: Run KXSS Check
       env:
@@ -51,31 +53,50 @@ jobs:
       run: |
         if [ -n "${{ github.event.inputs.custom_target }}" ]; then
           TARGET="${{ github.event.inputs.custom_target }}"
+          echo "Custom target provided: $TARGET"
+          echo "$TARGET" > targets.txt
         else
           TARGET=$(curl -s -f https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt | shuf -n 1)
+          echo "Random target selected: $TARGET"
+          echo "$TARGET" > targets.txt
         fi
-        
+
         if [ -z "$TARGET" ]; then
           echo "Error: No target could be obtained"
           exit 1
         fi
-        
-        echo "Target: $TARGET"
 
+        if [ "${{ github.event.inputs.subenum }}" != "false" ]; then
+          echo "Running subdomain enumeration..."
+          subfinder -d "$TARGET" -silent -o subdomains.txt || { echo "Subdomain enumeration failed"; exit 1; }
+          cat subdomains.txt | sort -u > final_targets.txt
+          echo "Subdomains found:"
+          cat final_targets.txt
+        else
+          echo "Subdomain enumeration disabled. Using main target only."
+          echo "$TARGET" > final_targets.txt
+        fi
+
+        echo "Starting KXSS scanning..."
         WAYBACKURLS="$(go env GOPATH)/bin/waybackurls"
         KXSS="$(go env GOPATH)/bin/kxss"
 
         [ -x "$WAYBACKURLS" ] || { echo "Error: waybackurls not found or not executable"; exit 1; }
         [ -x "$KXSS" ] || { echo "Error: kxss not found or not executable"; exit 1; }
 
-        "$WAYBACKURLS" "$TARGET" | "$KXSS" > result.txt || { echo "KXSS check failed"; exit 1; }
+        cat final_targets.txt | while read -r DOMAIN; do
+          echo "Scanning $DOMAIN for XSS..."
+          "$WAYBACKURLS" "$DOMAIN" | "$KXSS" >> result.txt || { echo "Error scanning $DOMAIN"; continue; }
+        done
 
-        if grep -E '<|>' result.txt; then
-            MESSAGE="🚨 *kxss found something cool* 🚨\nTarget: *$TARGET*\n\n\`\`\`\n$(cat result.txt | head -n 10)\n\`\`\`\n(Only first 10 lines shown)"
-            curl -s -f -X POST https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage \
-                -d chat_id="$TELEGRAM_CHAT_ID" \
-                -d text="$MESSAGE" \
-                -d parse_mode="Markdown" || echo "Failed to send Telegram notification"
+        if [ -s result.txt ]; then
+          echo "Potential XSS payloads detected."
+          MESSAGE="🚨 *kxss found potential vulnerabilities* 🚨\n\nTarget(s):\n$(cat final_targets.txt | head -n 5)\n\nResults:\n\`\`\`\n$(cat result.txt | head -n 10)\n\`\`\`\n(Only first 10 lines shown)"
+
+          curl -s -f -X POST https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage \
+              -d chat_id="$TELEGRAM_CHAT_ID" \
+              -d text="$MESSAGE" \
+              -d parse_mode="Markdown" || echo "Failed to send Telegram notification"
         else
             echo "No XSS payloads found for $TARGET."
         fi
