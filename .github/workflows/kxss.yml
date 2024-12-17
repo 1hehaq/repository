@@ -32,9 +32,9 @@ jobs:
 
     - name: Install Tools
       run: |
-        go install -v github.com/tomnomnom/waybackurls@latest
-        go install -v github.com/Emoe/kxss@latest
-        go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+        /usr/bin/go install -v github.com/tomnomnom/waybackurls@latest
+        /usr/bin/go install -v github.com/Emoe/kxss@latest
+        /usr/bin/go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
         echo "Tools installed"
 
       env:
