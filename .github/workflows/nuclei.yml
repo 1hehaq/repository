@@ -38,7 +38,7 @@ jobs:
     - name: Clone Coffin Templates
       run: |
         git clone https://github.com/coffinxp/nuclei-templates.git coffin-templates
-        mv coffin-templates $(find / -type d -name nuclei-templates 2>/dev/null)
+        mv coffin-templates ~/.nuclei-templates/
         echo "Coffin templates moved into Nuclei main directory"
 
     - name: Prepare Target
@@ -73,7 +73,7 @@ jobs:
           -o vulnerabilities.txt \
           -s high,critical \
           -es info,low \
-          -t ~/.nuclei-templates/nuclei-templates/ \
+          -t ~/.nuclei-templates/ \
           -j \
           -json-export nuclei-results.json
           
