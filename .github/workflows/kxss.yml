@@ -27,6 +27,7 @@ jobs:
       run: |
         sudo apt update
         sudo apt install -y golang-go golang
+        export PATH=$PATH:/usr/local/go/bin
         echo "Go installed"
 
     - name: Install Tools
@@ -52,8 +53,8 @@ jobs:
         fi
         echo "Target: $TARGET"
 
-        WAYBACKURLS=$(find / -type f -name "waybackurls" 2>/dev/null)
-        KXSS=$(find / -type f -name "kxss" 2>/dev/null)
+        WAYBACKURLS='/home/runner/go/bin/waybackurls'
+        KXSS='/home/runner/go/bin/kxss'
 
         if [ -z "$WAYBACKURLS" ] || [ -z "$KXSS" ]; then
           echo "Error: Required tools not found."
