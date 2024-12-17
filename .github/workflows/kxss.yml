@@ -21,55 +21,61 @@ jobs:
 
     steps:
     - name: Checkout Repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Set up Go environment
-      run: |
-        sudo apt update
-        sudo apt install -y golang-go golang
-        export PATH=$PATH:/usr/local/go/bin
-        echo "Go installed"
+      uses: actions/setup-go@v5
+      with:
+        go-version: '^1.21.0'
+        cache: false
 
     - name: Install Tools
       run: |
-        /usr/bin/go install -v github.com/tomnomnom/waybackurls@latest
-        /usr/bin/go install -v github.com/Emoe/kxss@latest
-        /usr/bin/go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-        echo "Tools installed"
-
-      env:
-        PATH: ${{ env.PATH }}:$HOME/go/bin
+        export PATH=$PATH:$(go env GOPATH)/bin
+        
+        go install -v github.com/tomnomnom/waybackurls@latest || { echo "Failed to install waybackurls"; exit 1; }
+        go install -v github.com/Emoe/kxss@latest || { echo "Failed to install kxss"; exit 1; }
+        go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest || { echo "Failed to install subfinder"; exit 1; }
+        
+        waybackurls -h > /dev/null 2>&1 || { echo "waybackurls not working"; exit 1; }
+        kxss -h > /dev/null 2>&1 || { echo "kxss not working"; exit 1; }
+        subfinder -h > /dev/null 2>&1 || { echo "subfinder not working"; exit 1; }
+        
+        echo "All tools successfully installed and verified"
 
     - name: Run KXSS Check
       env:
-        TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        CHATID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
       run: |
         if [ -n "${{ github.event.inputs.custom_target }}" ]; then
-          TARGET=${{ github.event.inputs.custom_target }}
+          TARGET="${{ github.event.inputs.custom_target }}"
         else
-          TARGET=$(curl -s https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt | shuf -n 1)
+          TARGET=$(curl -s -f https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt | shuf -n 1)
         fi
-        echo "Target: $TARGET"
-
-        WAYBACKURLS='/home/runner/go/bin/waybackurls'
-        KXSS='/home/runner/go/bin/kxss'
-
-        if [ -z "$WAYBACKURLS" ] || [ -z "$KXSS" ]; then
-          echo "Error: Required tools not found."
+        
+        if [ -z "$TARGET" ]; then
+          echo "Error: No target could be obtained"
           exit 1
         fi
+        
+        echo "Target: $TARGET"
 
-        echo "$TARGET" | "$WAYBACKURLS" | "$KXSS" > result.txt
+        WAYBACKURLS="$(go env GOPATH)/bin/waybackurls"
+        KXSS="$(go env GOPATH)/bin/kxss"
+
+        [ -x "$WAYBACKURLS" ] || { echo "Error: waybackurls not found or not executable"; exit 1; }
+        [ -x "$KXSS" ] || { echo "Error: kxss not found or not executable"; exit 1; }
+
+        "$WAYBACKURLS" "$TARGET" | "$KXSS" > result.txt || { echo "KXSS check failed"; exit 1; }
 
         if grep -E '<|>' result.txt; then
             MESSAGE="🚨 *kxss found something cool* 🚨\nTarget: *$TARGET*\n\n\`\`\`\n$(cat result.txt | head -n 10)\n\`\`\`\n(Only first 10 lines shown)"
-            curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
-                -d chat_id="${{ secrets.CHAT_ID }}" \
+            curl -s -f -X POST https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage \
+                -d chat_id="$TELEGRAM_CHAT_ID" \
                 -d text="$MESSAGE" \
-                -d parse_mode="Markdown"
-            echo "Notification sent to Telegram."
+                -d parse_mode="Markdown" || echo "Failed to send Telegram notification"
         else
             echo "No XSS payloads found for $TARGET."
         fi
