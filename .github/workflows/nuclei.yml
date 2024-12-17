@@ -38,22 +38,8 @@ jobs:
     - name: Clone Coffin Templates
       run: |
         git clone https://github.com/coffinxp/nuclei-templates.git coffin-templates
-        mkdir -p ~/.nuclei-templates/coffin
-        cp -r coffin-templates/* ~/.nuclei-templates/coffin
-
-    - name: Combine Templates (Official + Coffin)
-      run: |
-        mkdir -p ~/.nuclei-templates/combined
-        mkdir -p ~/.nuclei-templates/nuclei-templates
-        
-        if [ -d ~/.nuclei-templates/nuclei-templates ]; then
-          cp -r ~/.nuclei-templates/nuclei-templates/* ~/.nuclei-templates/combined/
-        else
-          echo "Warning: Official Nuclei templates directory not found."
-        fi
-        
-        cp -r ~/.nuclei-templates/coffin/* ~/.nuclei-templates/combined/
-        echo "Templates combined into ~/.nuclei-templates/combined"
+        cp -r coffin-templates/* ~/.nuclei-templates/nuclei-templates/
+        echo "Coffin templates moved into Nuclei main directory"
 
     - name: Prepare Target
       run: |
@@ -87,7 +73,7 @@ jobs:
           -o vulnerabilities.txt \
           -s high,critical \
           -es info,low \
-          -t ~/.nuclei-templates/combined/ \
+          -t ~/.nuclei-templates/nuclei-templates/ \
           -j \
           -json-export nuclei-results.json
           
