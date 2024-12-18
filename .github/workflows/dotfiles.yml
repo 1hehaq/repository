@@ -72,8 +72,7 @@ jobs:
                    -of json \
                    -t 1 \
                    -p 0.1 \
-                   -maxtime 300 \
-                   -c
+                   -maxtime 300
             else
               ffuf -u "http://$target/FUZZ" \
                    -w dotfiles.txt \
@@ -82,8 +81,7 @@ jobs:
                    -of json \
                    -t 1 \
                    -p 0.1 \
-                   -maxtime 300 \
-                   -c
+                   -maxtime 300
             fi
             
             if [ -f ffuf_output.json ]; then
