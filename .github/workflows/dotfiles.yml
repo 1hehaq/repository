@@ -38,7 +38,8 @@ jobs:
         id: targets
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.target }}" ]; then
-            echo "targets=${{ inputs.target }}" >> $GITHUB_OUTPUT
+            echo "${{ inputs.target }}" > single_target.txt
+            echo "targets=single_target.txt" >> $GITHUB_OUTPUT
           else
             wget https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt -O targets.txt
             echo "targets=targets.txt" >> $GITHUB_OUTPUT
