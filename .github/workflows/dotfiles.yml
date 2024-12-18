@@ -10,6 +10,10 @@ on:
         description: 'Enumerate subdomains'
         type: boolean
         default: false
+      status_codes:
+        description: 'HTTP status codes to match (comma-separated, e.g. 200,403,500)'
+        required: false
+        default: '200,301,302,403'
   schedule:
     - cron: '0 */3 * * *'
 
@@ -53,12 +57,17 @@ jobs:
 
       - name: Fuzz dotfiles
         run: |
+          status_codes="${{ inputs.status_codes }}"
+          if [ -z "$status_codes" ]; then
+            status_codes="200"
+          fi
+
           while read target; do
             echo "Fuzzing $target"
             if curl -s -k "https://$target" >/dev/null 2>&1; then
               ffuf -u "https://$target/FUZZ" \
                    -w dotfiles.txt \
-                   -mc 200,301,302,403 \
+                   -mc "$status_codes" \
                    -o ffuf_output.json \
                    -of json \
                    -t 1 \
@@ -68,7 +77,7 @@ jobs:
             else
               ffuf -u "http://$target/FUZZ" \
                    -w dotfiles.txt \
-                   -mc 200,301,302,403 \
+                   -mc "$status_codes" \
                    -o ffuf_output.json \
                    -of json \
                    -t 1 \
