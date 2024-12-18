@@ -14,7 +14,7 @@ on:
     - cron: '0 */3 * * *'
 
 env:
-  WORDLIST_URL: "https://github.com/Karanxa/Bug-Bounty-Wordlists/blob/main/dotfiles.txt"
+  WORDLIST_URL: "https://raw.githubusercontent.com/Karanxa/Bug-Bounty-Wordlists/main/dotfiles.txt"
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
@@ -56,9 +56,25 @@ jobs:
           while read target; do
             echo "Fuzzing $target"
             if curl -s -k "https://$target" >/dev/null 2>&1; then
-              ffuf -u "https://$target/FUZZ" -w dotfiles.txt -mc 200,301,302,403 -o ffuf_output.json -of json
+              ffuf -u "https://$target/FUZZ" \
+                   -w dotfiles.txt \
+                   -mc 200,301,302,403 \
+                   -o ffuf_output.json \
+                   -of json \
+                   -t 1 \
+                   -p 0.1 \
+                   -maxtime 300 \
+                   -c
             else
-              ffuf -u "http://$target/FUZZ" -w dotfiles.txt -mc 200,301,302,403 -o ffuf_output.json -of json
+              ffuf -u "http://$target/FUZZ" \
+                   -w dotfiles.txt \
+                   -mc 200,301,302,403 \
+                   -o ffuf_output.json \
+                   -of json \
+                   -t 1 \
+                   -p 0.1 \
+                   -maxtime 300 \
+                   -c
             fi
             
             if [ -f ffuf_output.json ]; then
