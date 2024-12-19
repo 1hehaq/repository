@@ -1,4 +1,4 @@
-name: loxs scan
+name: Loxs Security Scanner
 
 on:
   workflow_dispatch:
@@ -14,63 +14,36 @@ on:
           - 'XSS Scanner'
           - 'CRLF Scanner'
       
-      # Common inputs
       url_input:
         description: 'Target URL or path to URL list file'
         required: true
         type: string
+      
+      payload_file:
+        description: 'Path to payload file (leave empty for default)'
+        required: false
+        type: string
+      
       threads:
         description: 'Number of concurrent threads (0-10, default: 5)'
         required: false
         type: number
         default: 5
       
-      # LFI specific inputs
-      lfi_payload_file:
-        description: '[LFI] Path to payload file'
+      scanner_config:
+        description: 'Scanner-specific configuration in JSON format (see documentation)'
         required: false
         type: string
-      lfi_success_criteria:
-        description: '[LFI] Success criteria patterns (comma-separated, default: root:x:0:)'
-        required: false
-        type: string
-        default: 'root:x:0:'
+        default: '{}'
       
-      # OR specific inputs
-      or_payload_file:
-        description: '[OR] Path to payload file'
-        required: false
-        type: string
-      
-      # SQLi specific inputs
-      sqli_payload_file:
-        description: '[SQLi] Path to payload file'
-        required: false
-        type: string
-      sqli_cookie:
-        description: '[SQLi] Cookie for requests (optional)'
-        required: false
-        type: string
-      
-      # XSS specific inputs
-      xss_payload_file:
-        description: '[XSS] Path to payload file'
-        required: false
-        type: string
-      xss_timeout:
-        description: '[XSS] Request timeout in seconds'
-        required: false
-        type: number
-        default: 3
-      
-      # CRLF specific inputs
       generate_report:
         description: 'Generate HTML report'
         required: false
         type: boolean
         default: true
+      
       report_filename:
-        description: 'HTML report filename (if generate_report is true)'
+        description: 'HTML report filename'
         required: false
         type: string
         default: 'loxs_scan_report.html'
@@ -114,22 +87,39 @@ jobs:
           # XSS Payloads
           echo -e "<script>alert(1)</script>\n<img src=x onerror=alert(1)>\n<svg onload=alert(1)>" > payloads/xss_payloads.txt
 
+      - name: Parse scanner configuration
+        id: config
+        run: |
+          echo "CONFIG=${{ github.event.inputs.scanner_config }}" >> $GITHUB_ENV
+          
       - name: Run Loxs Scanner
         run: |
+          # Select scanner type
+          SCANNER_NUM="${{ 
+            github.event.inputs.scan_type == 'LFI Scanner' && '1' || 
+            github.event.inputs.scan_type == 'OR Scanner' && '2' || 
+            github.event.inputs.scan_type == 'SQLi Scanner' && '3' ||
+            github.event.inputs.scan_type == 'XSS Scanner' && '4' ||
+            github.event.inputs.scan_type == 'CRLF Scanner' && '5' 
+          }}"
+          
+          # Select payload file based on scanner type
+          PAYLOAD_FILE="${{ github.event.inputs.payload_file }}"
+          if [ -z "$PAYLOAD_FILE" ]; then
+            case $SCANNER_NUM in
+              1) PAYLOAD_FILE="payloads/lfi_payloads.txt" ;;
+              2) PAYLOAD_FILE="payloads/or_payloads.txt" ;;
+              3) PAYLOAD_FILE="payloads/sqli_payloads.txt" ;;
+              4) PAYLOAD_FILE="payloads/xss_payloads.txt" ;;
+              5) PAYLOAD_FILE="payloads/lfi_payloads.txt" ;;
+            esac
+          fi
+          
+          # Run scanner
           python loxs.py << EOF
-          ${{ github.event.inputs.scan_type == 'LFI Scanner' && '1' || 
-              github.event.inputs.scan_type == 'OR Scanner' && '2' || 
-              github.event.inputs.scan_type == 'SQLi Scanner' && '3' ||
-              github.event.inputs.scan_type == 'XSS Scanner' && '4' ||
-              github.event.inputs.scan_type == 'CRLF Scanner' && '5' }}
+          $SCANNER_NUM
           ${{ github.event.inputs.url_input }}
-          ${{ 
-            github.event.inputs.scan_type == 'LFI Scanner' && github.event.inputs.lfi_payload_file || 
-            github.event.inputs.scan_type == 'OR Scanner' && github.event.inputs.or_payload_file ||
-            github.event.inputs.scan_type == 'SQLi Scanner' && github.event.inputs.sqli_payload_file ||
-            github.event.inputs.scan_type == 'XSS Scanner' && github.event.inputs.xss_payload_file ||
-            'payloads/lfi_payloads.txt'
-          }}
+          $PAYLOAD_FILE
           ${{ github.event.inputs.threads }}
           ${{ github.event.inputs.generate_report && 'y' || 'n' }}
           ${{ github.event.inputs.report_filename }}
