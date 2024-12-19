@@ -1,0 +1,145 @@
+name: loxs scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: 'Select Scanner Type'
+        required: true
+        type: choice
+        options:
+          - 'LFI Scanner'
+          - 'OR Scanner'
+          - 'SQLi Scanner'
+          - 'XSS Scanner'
+          - 'CRLF Scanner'
+      
+      # Common inputs
+      url_input:
+        description: 'Target URL or path to URL list file'
+        required: true
+        type: string
+      threads:
+        description: 'Number of concurrent threads (0-10, default: 5)'
+        required: false
+        type: number
+        default: 5
+      
+      # LFI specific inputs
+      lfi_payload_file:
+        description: '[LFI] Path to payload file'
+        required: false
+        type: string
+      lfi_success_criteria:
+        description: '[LFI] Success criteria patterns (comma-separated, default: root:x:0:)'
+        required: false
+        type: string
+        default: 'root:x:0:'
+      
+      # OR specific inputs
+      or_payload_file:
+        description: '[OR] Path to payload file'
+        required: false
+        type: string
+      
+      # SQLi specific inputs
+      sqli_payload_file:
+        description: '[SQLi] Path to payload file'
+        required: false
+        type: string
+      sqli_cookie:
+        description: '[SQLi] Cookie for requests (optional)'
+        required: false
+        type: string
+      
+      # XSS specific inputs
+      xss_payload_file:
+        description: '[XSS] Path to payload file'
+        required: false
+        type: string
+      xss_timeout:
+        description: '[XSS] Request timeout in seconds'
+        required: false
+        type: number
+        default: 3
+      
+      # CRLF specific inputs
+      generate_report:
+        description: 'Generate HTML report'
+        required: false
+        type: boolean
+        default: true
+      report_filename:
+        description: 'HTML report filename (if generate_report is true)'
+        required: false
+        type: string
+        default: 'loxs_scan_report.html'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+
+      - name: Install Chrome and ChromeDriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser chromium-chromedriver
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests colorama rich prompt_toolkit selenium webdriver_manager beautifulsoup4 aiohttp packaging urllib3 GitPython pyyaml flask
+
+      - name: Create payload files directory
+        run: mkdir -p payloads
+
+      - name: Create default payload files
+        run: |
+          # LFI Payloads
+          echo -e "/etc/passwd\n../../etc/passwd\n../../../etc/passwd" > payloads/lfi_payloads.txt
+          
+          # OR Payloads
+          echo -e "//google.com/%2F..\n//google.com/\n//google.com" > payloads/or_payloads.txt
+          
+          # SQLi Payloads
+          echo -e "' OR '1'='1\n' OR 1=1--\n' UNION SELECT NULL--" > payloads/sqli_payloads.txt
+          
+          # XSS Payloads
+          echo -e "<script>alert(1)</script>\n<img src=x onerror=alert(1)>\n<svg onload=alert(1)>" > payloads/xss_payloads.txt
+
+      - name: Run Loxs Scanner
+        run: |
+          python loxs.py << EOF
+          ${{ github.event.inputs.scan_type == 'LFI Scanner' && '1' || 
+              github.event.inputs.scan_type == 'OR Scanner' && '2' || 
+              github.event.inputs.scan_type == 'SQLi Scanner' && '3' ||
+              github.event.inputs.scan_type == 'XSS Scanner' && '4' ||
+              github.event.inputs.scan_type == 'CRLF Scanner' && '5' }}
+          ${{ github.event.inputs.url_input }}
+          ${{ 
+            github.event.inputs.scan_type == 'LFI Scanner' && github.event.inputs.lfi_payload_file || 
+            github.event.inputs.scan_type == 'OR Scanner' && github.event.inputs.or_payload_file ||
+            github.event.inputs.scan_type == 'SQLi Scanner' && github.event.inputs.sqli_payload_file ||
+            github.event.inputs.scan_type == 'XSS Scanner' && github.event.inputs.xss_payload_file ||
+            'payloads/lfi_payloads.txt'
+          }}
+          ${{ github.event.inputs.threads }}
+          ${{ github.event.inputs.generate_report && 'y' || 'n' }}
+          ${{ github.event.inputs.report_filename }}
+          EOF
+
+      - name: Upload scan report
+        if: github.event.inputs.generate_report == 'true'
+        uses: actions/upload-artifact@v2
+        with:
+          name: loxs-scan-report
+          path: ${{ github.event.inputs.report_filename }}
+          if-no-files-found: error
+
