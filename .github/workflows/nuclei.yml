@@ -63,19 +63,24 @@ jobs:
       run: |
         TARGET_FILE=$([ -f subdomains.txt ] && echo "subdomains.txt" || echo "targets.txt")
         
+        # Add rate limiting protection
         nuclei \
           -l $TARGET_FILE \
           -c 50 \
           -stats \
-          -timeout 10 \
-          -retries 2 \
+          -timeout 15 \
+          -retries 3 \
           -rl 150 \
+          -bulk-size 25 \
+          -headless-bulk-size 10 \
           -o vulnerabilities.txt \
           -s high,critical \
-          -es info,low \
+          -es info,low,medium \
           -t ~/.nuclei-templates/ \
           -j \
-          -json-export nuclei-results.json
+          -json-export nuclei-results.json \
+          -system-resolvers \
+          -silent
           
         VULN_COUNT=$(grep -c '"severity": "high\|"severity": "critical"' nuclei-results.json || echo 0)
         echo "High/Critical Vulnerabilities found: $VULN_COUNT"
@@ -88,22 +93,29 @@ jobs:
         TARGET=$(cat targets.txt)
         SUBDOMAIN_COUNT=$([ -f subdomains.txt ] && wc -l < subdomains.txt || echo "0")
         VULN_COUNT=$(grep -c '"severity": "high\|"severity": "critical"' nuclei-results.json || echo "0")
-        MESSAGE="🚨 *Vulnerability Scan Report* 🚨
-        Target: *$TARGET*
-        Subdomains Found: *$SUBDOMAIN_COUNT*
-        High/Critical Vulnerabilities: *$VULN_COUNT*"
+        
+        # Escape special characters for Markdown
+        TARGET_ESCAPED=$(echo "$TARGET" | sed 's/[_*[\]()~`>#+\-=|{}.!]/\\&/g')
+        
+        MESSAGE="🚨 *Vulnerability Scan Report* 🚨%0A"
+        MESSAGE+="Target: \`$TARGET_ESCAPED\`%0A"
+        MESSAGE+="Subdomains Found: \`$SUBDOMAIN_COUNT\`%0A"
+        MESSAGE+="High/Critical Vulnerabilities: \`$VULN_COUNT\`"
         
         if [ -s vulnerabilities.txt ]; then
+          # Format vulnerabilities.txt content for better readability
+          sed -i 's/\[/\\\[/g; s/\]/\\\]/g' vulnerabilities.txt
+          
           curl -F "chat_id=$TELEGRAM_CHAT_ID" \
                -F "document=@vulnerabilities.txt" \
                -F "caption=$MESSAGE" \
-               -F "parse_mode=Markdown" \
+               -F "parse_mode=MarkdownV2" \
                "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendDocument"
         else
-          curl -s -X POST https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage \
-               -d chat_id=$TELEGRAM_CHAT_ID \
-               -d text="$MESSAGE" \
-               -d parse_mode=Markdown
+          curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+               -d "chat_id=$TELEGRAM_CHAT_ID" \
+               -d "text=$MESSAGE" \
+               -d "parse_mode=MarkdownV2"
         fi
 
     - name: Upload Scan Results
